@@ -16,12 +16,13 @@ type Partition struct {
 	mu           sync.RWMutex
 	seg          *Segment
 	idx          *Index
+	timeindex    *Timeindex
 	indexEvery   int32
 	sinceLastIdx int32
 	nextOffset   atomic.Int64
 }
 
-func OpenPartition(logPath, indexPath string, indexEvery int32) (*Partition, error) {
+func OpenPartition(logPath, indexPath, timeindexPath string, indexEvery int32) (*Partition, error) {
 	seg, err := OpenSegment(logPath)
 	if err != nil {
 		return nil, err
@@ -31,14 +32,26 @@ func OpenPartition(logPath, indexPath string, indexEvery int32) (*Partition, err
 		seg.Close()
 		return nil, err
 	}
+	timeindex, err := OpenTimeindex(timeindexPath)
+	if err != nil {
+		seg.Close()
+		idx.Close()
+		return nil, err
+	}
 	return &Partition{
 		seg:        seg,
 		idx:        idx,
+		timeindex:  timeindex,
 		indexEvery: indexEvery,
 	}, nil
 }
 
-func (p *Partition) Append(data []byte) (int64, error) {
+// Append writes data and records it at the given timestamp. timestamp comes
+// from the caller rather than time.Now() internally: until record batch
+// parsing exists (Phase 2/3), there's no batch-derived timestamp to use, so
+// callers - currently just tests - supply one explicitly instead of this
+// method silently pretending to have a real one.
+func (p *Partition) Append(data []byte, timestamp int64) (int64, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -51,6 +64,7 @@ func (p *Partition) Append(data []byte) (int64, error) {
 
 	if p.sinceLastIdx == 0 {
 		p.idx.Append(int32(offset), int32(pos))
+		p.timeindex.Append(timestamp, int32(offset))
 	}
 
 	p.sinceLastIdx = (p.sinceLastIdx + 1) % p.indexEvery
@@ -75,6 +89,19 @@ func (p *Partition) LogEndOffset() int64 {
 	return p.nextOffset.Load()
 }
 
+// LookupOffsetByTimestamp returns the offset of the nearest indexed entry
+// at or before targetTimestamp. This is index-granularity, not record-exact
+// - pinpointing the precise record additionally needs record batch parsing,
+// which doesn't exist yet, so this returns only what the sparse time index
+// alone can honestly answer.
+func (p *Partition) LookupOffsetByTimestamp(targetTimestamp int64) (int64, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	_, relOffset, found := p.timeindex.Lookup(targetTimestamp)
+	return int64(relOffset), found
+}
+
 func (p *Partition) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -82,5 +109,8 @@ func (p *Partition) Close() error {
 	if err := p.seg.Close(); err != nil {
 		return err
 	}
-	return p.idx.Close()
+	if err := p.idx.Close(); err != nil {
+		return err
+	}
+	return p.timeindex.Close()
 }
