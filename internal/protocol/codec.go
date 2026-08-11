@@ -21,6 +21,14 @@ func NewDecoder(buf []byte) *Decoder {
 	return &Decoder{buf: buf}
 }
 
+// Remaining returns every byte not yet consumed by a Decoder method call -
+// used to decode a shared header, then hand the rest to a specific handler
+// without that handler needing to know where in the original buffer it
+// starts.
+func (d *Decoder) Remaining() []byte {
+	return d.buf[d.pos:]
+}
+
 func (d *Decoder) Int8() (int8, error) {
 	if d.pos+1 > len(d.buf) {
 		return 0, fmt.Errorf("int8: %w", ErrNotEnoughData)
