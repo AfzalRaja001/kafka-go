@@ -65,6 +65,31 @@ func (s *Segment) Sync() error {
 	return s.file.Sync()
 }
 
+// Size returns the segment's current size in bytes - used by Partition to
+// decide when this segment is full and it's time to roll to a new one.
+func (s *Segment) Size() int64 {
+	return s.size
+}
+
+// RecordCount scans the whole segment and returns how many complete records
+// it holds. Only meaningful right after OpenSegment (whose Recover call
+// already guarantees every record up to s.size is complete) - used to
+// restore Partition's nextOffset counter after a restart, without needing
+// to persist a separate record count anywhere.
+func (s *Segment) RecordCount() (int64, error) {
+	var pos int64
+	var count int64
+	for pos < s.size {
+		data, err := s.ReadAt(pos)
+		if err != nil {
+			return 0, err
+		}
+		pos += 4 + int64(len(data))
+		count++
+	}
+	return count, nil
+}
+
 func (s *Segment) Close() error {
 	return s.file.Close()
 }
