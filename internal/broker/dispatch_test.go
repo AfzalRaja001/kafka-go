@@ -1,10 +1,25 @@
 package broker
 
 import (
+	"encoding/binary"
+	"hash/crc32"
 	"testing"
 
 	"github.com/AfzalRaja001/kafka-go/internal/protocol"
+	"github.com/AfzalRaja001/kafka-go/internal/storage"
 )
+
+// buildMinimalRecordBatch constructs a valid 61-byte record batch header
+// (magic 2, correct CRC), no actual record payload - enough for dispatch
+// to route to HandleProduce and have it accept the batch.
+func buildMinimalRecordBatch() []byte {
+	buf := make([]byte, 61)
+	buf[16] = 2 // magic
+	binary.BigEndian.PutUint32(buf[57:61], 0) // recordCount
+	crc := crc32.Checksum(buf[21:], crc32.MakeTable(crc32.Castagnoli))
+	binary.BigEndian.PutUint32(buf[17:21], crc)
+	return buf
+}
 
 func encodeRequestHeader(apiKey, apiVersion int16, correlationID int32, clientID string) *protocol.Encoder {
 	enc := protocol.NewEncoder()
@@ -18,7 +33,7 @@ func encodeRequestHeader(apiKey, apiVersion int16, correlationID int32, clientID
 func TestDispatch_ApiVersions(t *testing.T) {
 	req := encodeRequestHeader(protocol.ApiKeyApiVersions, 0, 42, "kcat").Result()
 
-	resp, err := dispatch(req, protocol.NewTopicRegistry(), nil)
+	resp, err := dispatch(req, protocol.NewTopicRegistry(), nil, storage.NewFakeLog())
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -38,7 +53,7 @@ func TestDispatch_Metadata(t *testing.T) {
 	enc.StringArray([]string{"orders"})
 	req := enc.Result()
 
-	resp, err := dispatch(req, registry, nil)
+	resp, err := dispatch(req, registry, nil, storage.NewFakeLog())
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -50,17 +65,41 @@ func TestDispatch_Metadata(t *testing.T) {
 	}
 }
 
+func TestDispatch_Produce(t *testing.T) {
+	enc := encodeRequestHeader(protocol.ApiKeyProduce, 3, 9, "kcat")
+	var txnID *string
+	enc.NullableString(txnID)
+	enc.Int16(1)  // acks
+	enc.Int32(0)  // timeout_ms
+	enc.Int32(1)  // topic count
+	enc.String("orders")
+	enc.Int32(1) // partition count
+	enc.Int32(0) // partition
+	enc.Bytes(buildMinimalRecordBatch())
+
+	resp, err := dispatch(enc.Result(), protocol.NewTopicRegistry(), nil, storage.NewFakeLog())
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+
+	dec := protocol.NewDecoder(resp)
+	correlationID, _ := dec.Int32()
+	if correlationID != 9 {
+		t.Errorf("correlation_id = %d, want 9", correlationID)
+	}
+}
+
 func TestDispatch_UnsupportedApiKey(t *testing.T) {
 	req := encodeRequestHeader(999, 0, 1, "kcat").Result()
 
-	_, err := dispatch(req, protocol.NewTopicRegistry(), nil)
+	_, err := dispatch(req, protocol.NewTopicRegistry(), nil, storage.NewFakeLog())
 	if err == nil {
 		t.Fatal("expected an error for an unsupported api_key, got nil")
 	}
 }
 
 func TestDispatch_TruncatedRequest(t *testing.T) {
-	_, err := dispatch([]byte{0, 18}, protocol.NewTopicRegistry(), nil) // only 2 bytes
+	_, err := dispatch([]byte{0, 18}, protocol.NewTopicRegistry(), nil, storage.NewFakeLog()) // only 2 bytes
 	if err == nil {
 		t.Fatal("expected an error for a truncated request, got nil")
 	}
