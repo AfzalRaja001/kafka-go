@@ -12,19 +12,21 @@ import (
 // (topic, partition) pair, each in its own subdirectory under dir, matching
 // the directory layout kafka-from-scratch.md Part 3 describes.
 type DiskLog struct {
-	mu         sync.RWMutex
-	dir        string
-	indexEvery int32
-	parts      map[logKey]*Partition
+	mu              sync.RWMutex
+	dir             string
+	segmentMaxBytes int64
+	indexEvery      int32
+	parts           map[logKey]*Partition
 }
 
 var _ Log = (*DiskLog)(nil)
 
-func NewDiskLog(dir string, indexEvery int32) *DiskLog {
+func NewDiskLog(dir string, segmentMaxBytes int64, indexEvery int32) *DiskLog {
 	return &DiskLog{
-		dir:        dir,
-		indexEvery: indexEvery,
-		parts:      make(map[logKey]*Partition),
+		dir:             dir,
+		segmentMaxBytes: segmentMaxBytes,
+		indexEvery:      indexEvery,
+		parts:           make(map[logKey]*Partition),
 	}
 }
 
@@ -79,19 +81,11 @@ func (d *DiskLog) openPartition(topic string, partition int32) (*Partition, erro
 	}
 
 	partDir := filepath.Join(d.dir, fmt.Sprintf("%s-%d", topic, partition))
-	if err := os.MkdirAll(partDir, 0755); err != nil {
-		return nil, err
-	}
 
-	// Base offset 0, zero-padded to 20 digits, per the real Kafka segment
-	// naming convention - always true today since Partition only wraps one
-	// segment; stays correct once segment rolling adds more.
-	p, err := OpenPartition(
-		filepath.Join(partDir, "00000000000000000000.log"),
-		filepath.Join(partDir, "00000000000000000000.index"),
-		filepath.Join(partDir, "00000000000000000000.timeindex"),
-		d.indexEvery,
-	)
+	// OpenPartition creates partDir itself and discovers/creates segments
+	// within it - DiskLog only needs to know the directory, not individual
+	// segment filenames, now that Partition manages rolling internally.
+	p, err := OpenPartition(partDir, d.segmentMaxBytes, d.indexEvery)
 	if err != nil {
 		return nil, err
 	}
@@ -136,9 +130,9 @@ func (d *DiskLog) Read(topic string, partition int32, offset int64, maxBytes int
 	return out, nil
 }
 
-// EarliestOffset is always 0: nothing trims or rolls segments yet, so every
-// record ever appended is still present. This will need to change once
-// retention (Phase 5) or segment rolling can drop old data.
+// EarliestOffset is always 0: segments now roll, but nothing deletes old
+// ones yet - retention (Phase 5) is what would actually drop data, and
+// until it exists every record ever appended is still present.
 func (d *DiskLog) EarliestOffset(topic string, partition int32) (int64, error) {
 	if _, ok := d.getPartition(topic, partition); !ok {
 		return 0, fmt.Errorf("unknown topic-partition %s-%d", topic, partition)

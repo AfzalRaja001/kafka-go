@@ -6,7 +6,7 @@ import (
 )
 
 func TestDiskLog_AppendAndRead(t *testing.T) {
-	log := NewDiskLog(t.TempDir(), 5)
+	log := NewDiskLog(t.TempDir(), 1<<20, 5)
 	defer log.Close()
 
 	base, err := log.Append("orders", 0, []byte("first"))
@@ -35,7 +35,7 @@ func TestDiskLog_AppendAndRead(t *testing.T) {
 }
 
 func TestDiskLog_ReadRespectsMaxBytes(t *testing.T) {
-	log := NewDiskLog(t.TempDir(), 5)
+	log := NewDiskLog(t.TempDir(), 1<<20, 5)
 	defer log.Close()
 
 	log.Append("orders", 0, []byte("first"))  // 5 bytes
@@ -51,7 +51,7 @@ func TestDiskLog_ReadRespectsMaxBytes(t *testing.T) {
 }
 
 func TestDiskLog_ReadUnknownTopicPartitionErrors(t *testing.T) {
-	log := NewDiskLog(t.TempDir(), 5)
+	log := NewDiskLog(t.TempDir(), 1<<20, 5)
 	defer log.Close()
 
 	if _, err := log.Read("missing", 0, 0, 1024); err == nil {
@@ -66,7 +66,7 @@ func TestDiskLog_ReadUnknownTopicPartitionErrors(t *testing.T) {
 }
 
 func TestDiskLog_EarliestAndLatestOffset(t *testing.T) {
-	log := NewDiskLog(t.TempDir(), 5)
+	log := NewDiskLog(t.TempDir(), 1<<20, 5)
 	defer log.Close()
 
 	for i := 0; i < 5; i++ {
@@ -84,7 +84,7 @@ func TestDiskLog_EarliestAndLatestOffset(t *testing.T) {
 }
 
 func TestDiskLog_PartitionsAreIndependent(t *testing.T) {
-	log := NewDiskLog(t.TempDir(), 5)
+	log := NewDiskLog(t.TempDir(), 1<<20, 5)
 	defer log.Close()
 
 	log.Append("orders", 0, []byte("orders-p0"))
@@ -101,16 +101,44 @@ func TestDiskLog_PartitionsAreIndependent(t *testing.T) {
 	}
 }
 
+func TestDiskLog_SegmentRolling(t *testing.T) {
+	log := NewDiskLog(t.TempDir(), 10, 1000) // tiny segmentMaxBytes forces rolling
+	defer log.Close()
+
+	for i := 0; i < 5; i++ {
+		offset, err := log.Append("orders", 0, []byte(fmt.Sprintf("record-%d", i)))
+		if err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+		if offset != int64(i) {
+			t.Fatalf("append %d: offset = %d, want %d", i, offset, i)
+		}
+	}
+
+	for i := 0; i < 5; i++ {
+		want := fmt.Sprintf("record-%d", i)
+		// maxBytes = exactly one record's length, so Read stops after it
+		// instead of concatenating every remaining record too.
+		data, err := log.Read("orders", 0, int64(i), int32(len(want)))
+		if err != nil {
+			t.Fatalf("read %d: %v", i, err)
+		}
+		if string(data) != want {
+			t.Errorf("offset %d: got %q, want %q", i, data, want)
+		}
+	}
+}
+
 func TestDiskLog_PersistsAcrossReopen(t *testing.T) {
 	dir := t.TempDir()
 
-	log1 := NewDiskLog(dir, 5)
+	log1 := NewDiskLog(dir, 1<<20, 5)
 	log1.Append("orders", 0, []byte("durable"))
 	if err := log1.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
 
-	log2 := NewDiskLog(dir, 5)
+	log2 := NewDiskLog(dir, 1<<20, 5)
 	defer log2.Close()
 
 	got, err := log2.Read("orders", 0, 0, 1024)
