@@ -4,12 +4,13 @@ import (
 	"fmt"
 
 	"github.com/AfzalRaja001/kafka-go/internal/protocol"
+	"github.com/AfzalRaja001/kafka-go/internal/storage"
 )
 
 // dispatch decodes the request header every Kafka request shares
 // (api_key, api_version, correlation_id, client_id), then routes to
 // whichever handler owns that api_key, passing it whatever bytes remain.
-func dispatch(msg []byte, registry *protocol.TopicRegistry, brokers []protocol.Broker) ([]byte, error) {
+func dispatch(msg []byte, registry *protocol.TopicRegistry, brokers []protocol.Broker, log storage.Log) ([]byte, error) {
 	dec := protocol.NewDecoder(msg)
 
 	apiKey, err := dec.Int16()
@@ -33,6 +34,8 @@ func dispatch(msg []byte, registry *protocol.TopicRegistry, brokers []protocol.B
 		return protocol.HandleApiVersions(correlationID, apiVersion), nil
 	case protocol.ApiKeyMetadata:
 		return protocol.HandleMetadata(correlationID, dec.Remaining(), registry, brokers)
+	case protocol.ApiKeyProduce:
+		return protocol.HandleProduce(correlationID, dec.Remaining(), log)
 	default:
 		return nil, fmt.Errorf("unsupported api_key %d", apiKey)
 	}

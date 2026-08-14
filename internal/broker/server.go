@@ -9,11 +9,12 @@ import (
 	"net"
 
 	"github.com/AfzalRaja001/kafka-go/internal/protocol"
+	"github.com/AfzalRaja001/kafka-go/internal/storage"
 )
 
 // Serve listens on address and accepts connections until ctx is canceled,
 // at which point it closes the listener and returns cleanly.
-func Serve(ctx context.Context, address string, registry *protocol.TopicRegistry, brokers []protocol.Broker) error {
+func Serve(ctx context.Context, address string, registry *protocol.TopicRegistry, brokers []protocol.Broker, diskLog storage.Log) error {
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return err
@@ -34,11 +35,11 @@ func Serve(ctx context.Context, address string, registry *protocol.TopicRegistry
 				return err
 			}
 		}
-		go handleConn(conn, registry, brokers)
+		go handleConn(conn, registry, brokers, diskLog)
 	}
 }
 
-func handleConn(conn net.Conn, registry *protocol.TopicRegistry, brokers []protocol.Broker) {
+func handleConn(conn net.Conn, registry *protocol.TopicRegistry, brokers []protocol.Broker, diskLog storage.Log) {
 	defer conn.Close()
 
 	reader := bufio.NewReaderSize(conn, 64*1024)
@@ -54,7 +55,7 @@ func handleConn(conn net.Conn, registry *protocol.TopicRegistry, brokers []proto
 			return
 		}
 
-		resp, err := dispatch(msg, registry, brokers)
+		resp, err := dispatch(msg, registry, brokers, diskLog)
 		if err != nil {
 			log.Printf("broker: dispatch error: %v", err)
 			return

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/AfzalRaja001/kafka-go/internal/protocol"
+	"github.com/AfzalRaja001/kafka-go/internal/storage"
 )
 
 func TestHandleConn_ApiVersionsRoundTrip(t *testing.T) {
@@ -13,7 +14,7 @@ func TestHandleConn_ApiVersionsRoundTrip(t *testing.T) {
 	registry := protocol.NewTopicRegistry()
 	brokers := []protocol.Broker{{NodeID: 1, Host: "localhost", Port: 9092}}
 
-	go handleConn(server, registry, brokers)
+	go handleConn(server, registry, brokers, storage.NewFakeLog())
 	defer client.Close()
 
 	req := encodeRequestHeader(protocol.ApiKeyApiVersions, 0, 55, "kcat").Result()
@@ -43,7 +44,7 @@ func TestHandleConn_MultipleRequestsOnOneConnection(t *testing.T) {
 	registry := protocol.NewTopicRegistry()
 	registry.AddTopic(&protocol.Topic{Name: "orders"})
 
-	go handleConn(server, registry, nil)
+	go handleConn(server, registry, nil, storage.NewFakeLog())
 	defer client.Close()
 
 	// First request: ApiVersions.
