@@ -36,6 +36,8 @@ func dispatch(msg []byte, registry *protocol.TopicRegistry, brokers []protocol.B
 		return protocol.HandleMetadata(correlationID, dec.Remaining(), registry, brokers)
 	case protocol.ApiKeyProduce:
 		return protocol.HandleProduce(correlationID, dec.Remaining(), log)
+	case protocol.ApiKeyFetch:
+		return protocol.HandleFetch(correlationID, dec.Remaining(), log)
 	default:
 		return nil, fmt.Errorf("unsupported api_key %d", apiKey)
 	}

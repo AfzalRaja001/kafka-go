@@ -3,6 +3,7 @@ package protocol
 // Kafka api_key values this broker implements.
 const (
 	ApiKeyProduce     int16 = 0
+	ApiKeyFetch       int16 = 1
 	ApiKeyMetadata    int16 = 3
 	ApiKeyApiVersions int16 = 18
 )
@@ -24,6 +25,7 @@ type SupportedAPI struct {
 // as every other API here, just landing on a different version.
 var SupportedAPIs = []SupportedAPI{
 	{APIKey: ApiKeyProduce, MinVersion: 3, MaxVersion: 3},
+	{APIKey: ApiKeyFetch, MinVersion: 0, MaxVersion: 0},
 	{APIKey: ApiKeyApiVersions, MinVersion: 0, MaxVersion: 0},
 	{APIKey: ApiKeyMetadata, MinVersion: 0, MaxVersion: 0},
 }
