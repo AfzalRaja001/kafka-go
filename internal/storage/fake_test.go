@@ -47,15 +47,21 @@ func TestFakeLog_AppendThenRead(t *testing.T) {
 	}
 }
 
-func TestFakeLog_ReadDifferentPartitionIsEmpty(t *testing.T) {
+// TestFakeLog_ReadUnknownPartitionErrors matches DiskLog's own contract:
+// a partition nothing has ever been Appended to errors on read rather than
+// silently returning empty data. (Appending to partition 0 doesn't make
+// partition 1 "exist, but empty" - they're entirely separate partitions.)
+func TestFakeLog_ReadUnknownPartitionErrors(t *testing.T) {
 	log := NewFakeLog()
 	log.Append("orders", 0, []byte("data"))
 
-	got, err := log.Read("orders", 1, 0, 1024)
-	if err != nil {
-		t.Fatalf("Read: %v", err)
+	if _, err := log.Read("orders", 1, 0, 1024); err == nil {
+		t.Fatal("expected an error reading an unknown partition, got nil")
 	}
-	if got != nil {
-		t.Fatalf("Read on untouched partition = %q, want nil", got)
+	if _, err := log.EarliestOffset("orders", 1); err == nil {
+		t.Fatal("expected an error for EarliestOffset on an unknown partition, got nil")
+	}
+	if _, err := log.LatestOffset("orders", 1); err == nil {
+		t.Fatal("expected an error for LatestOffset on an unknown partition, got nil")
 	}
 }
