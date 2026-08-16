@@ -164,7 +164,7 @@ func TestHandleFetch_TimesOutWhenNoDataArrives(t *testing.T) {
 // unexpected rather than "nothing new yet," and errors trying to read one.
 func TestHandleFetch_EmptyResponseIsNotNull(t *testing.T) {
 	log := storage.NewFakeLog()
-	log.Append("orders", 0, []byte("only-record")) // offset 0 - partition exists
+	log.Append("orders", 0, []byte("only-record"), 1) // offset 0 - partition exists
 
 	const maxWait = 100 * time.Millisecond
 	// Fetch from offset 1: caught up, nothing there, but the partition
