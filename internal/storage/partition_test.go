@@ -22,7 +22,7 @@ func TestPartition_RoundTrip(t *testing.T) {
 
 	for i := 0; i < 100; i++ {
 		record := []byte(fmt.Sprintf("record-%d", i))
-		offset, err := p.Append(record, int64(1000+i))
+		offset, err := p.Append(record, 1, int64(1000+i))
 		if err != nil {
 			t.Fatalf("append %d: %v", i, err)
 		}
@@ -32,7 +32,7 @@ func TestPartition_RoundTrip(t *testing.T) {
 	}
 
 	for _, target := range []int64{0, 1, 47, 63, 99} {
-		data, err := p.Read(target)
+		data, _, err := p.Read(target)
 		if err != nil {
 			t.Fatalf("read %d: %v", target, err)
 		}
@@ -48,7 +48,7 @@ func TestPartition_IndexIsSparse(t *testing.T) {
 	defer p.Close()
 
 	for i := 0; i < 100; i++ {
-		p.Append([]byte(fmt.Sprintf("record-%d", i)), int64(1000+i))
+		p.Append([]byte(fmt.Sprintf("record-%d", i)), 1, int64(1000+i))
 	}
 
 	active := p.segments[len(p.segments)-1]
@@ -65,7 +65,7 @@ func TestPartition_LookupOffsetByTimestamp(t *testing.T) {
 	defer p.Close()
 
 	for i := 0; i < 100; i++ {
-		p.Append([]byte(fmt.Sprintf("record-%d", i)), int64(1000+i*10))
+		p.Append([]byte(fmt.Sprintf("record-%d", i)), 1, int64(1000+i*10))
 	}
 
 	offset, found := p.LookupOffsetByTimestamp(1250)
@@ -89,7 +89,7 @@ func TestPartition_ConcurrentAppend_Safe(t *testing.T) {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			offset, err := p.Append([]byte(fmt.Sprintf("record-%d", n)), int64(n))
+			offset, err := p.Append([]byte(fmt.Sprintf("record-%d", n)), 1, int64(n))
 			if err != nil {
 				t.Errorf("append: %v", err)
 				return
@@ -117,7 +117,7 @@ func TestPartition_ConcurrentReadWrite(t *testing.T) {
 	defer p.Close()
 
 	for i := 0; i < 20; i++ {
-		p.Append([]byte(fmt.Sprintf("record-%d", i)), int64(i))
+		p.Append([]byte(fmt.Sprintf("record-%d", i)), 1, int64(i))
 	}
 
 	var wg sync.WaitGroup
@@ -127,7 +127,7 @@ func TestPartition_ConcurrentReadWrite(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for offset := int64(0); offset < 20; offset++ {
-				if _, err := p.Read(offset); err != nil {
+				if _, _, err := p.Read(offset); err != nil {
 					t.Errorf("read %d: %v", offset, err)
 				}
 			}
@@ -138,7 +138,7 @@ func TestPartition_ConcurrentReadWrite(t *testing.T) {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			p.Append([]byte(fmt.Sprintf("record-%d", n)), int64(n))
+			p.Append([]byte(fmt.Sprintf("record-%d", n)), 1, int64(n))
 		}(i)
 	}
 
@@ -156,7 +156,7 @@ func TestPartition_RollsToNewSegment(t *testing.T) {
 	defer p.Close()
 
 	for i := 0; i < 5; i++ {
-		offset, err := p.Append([]byte(fmt.Sprintf("record-%d", i)), int64(i))
+		offset, err := p.Append([]byte(fmt.Sprintf("record-%d", i)), 1, int64(i))
 		if err != nil {
 			t.Fatalf("append %d: %v", i, err)
 		}
@@ -170,7 +170,7 @@ func TestPartition_RollsToNewSegment(t *testing.T) {
 	}
 
 	for i := 0; i < 5; i++ {
-		data, err := p.Read(int64(i))
+		data, _, err := p.Read(int64(i))
 		if err != nil {
 			t.Fatalf("read %d: %v", i, err)
 		}
@@ -192,7 +192,7 @@ func TestPartition_ReopenAcrossMultipleSegments(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	for i := 0; i < 5; i++ {
-		p1.Append([]byte(fmt.Sprintf("record-%d", i)), int64(i))
+		p1.Append([]byte(fmt.Sprintf("record-%d", i)), 1, int64(i))
 	}
 	segmentsBefore := len(p1.segments)
 	if err := p1.Close(); err != nil {
@@ -214,7 +214,7 @@ func TestPartition_ReopenAcrossMultipleSegments(t *testing.T) {
 
 	// A new append after reopening must continue the offset sequence
 	// correctly, not restart or collide with existing data.
-	offset, err := p2.Append([]byte("record-5"), 5)
+	offset, err := p2.Append([]byte("record-5"), 1, 5)
 	if err != nil {
 		t.Fatalf("append after reopen: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestPartition_ReopenAcrossMultipleSegments(t *testing.T) {
 	}
 
 	for i := 0; i < 6; i++ {
-		data, err := p2.Read(int64(i))
+		data, _, err := p2.Read(int64(i))
 		if err != nil {
 			t.Fatalf("read %d after reopen: %v", i, err)
 		}
@@ -247,7 +247,7 @@ func TestPartition_MultiSegmentCrashRecovery(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	for i := 0; i < 5; i++ {
-		p1.Append([]byte(fmt.Sprintf("record-%d", i)), int64(i))
+		p1.Append([]byte(fmt.Sprintf("record-%d", i)), 1, int64(i))
 	}
 	if len(p1.segments) < 2 {
 		t.Fatalf("expected multiple segments before the crash, got %d", len(p1.segments))
@@ -277,7 +277,7 @@ func TestPartition_MultiSegmentCrashRecovery(t *testing.T) {
 	// Every record written before the crash must still be readable,
 	// across every segment, not just the one that was corrupted.
 	for i := 0; i < 5; i++ {
-		data, err := p2.Read(int64(i))
+		data, _, err := p2.Read(int64(i))
 		if err != nil {
 			t.Fatalf("read %d after recovery: %v", i, err)
 		}
@@ -290,14 +290,14 @@ func TestPartition_MultiSegmentCrashRecovery(t *testing.T) {
 	// The torn write must be gone: appending now should land at offset 5,
 	// not after the corrupt header, and the new offset sequence must be
 	// contiguous with what existed before the crash.
-	offset, err := p2.Append([]byte("record-5"), 5)
+	offset, err := p2.Append([]byte("record-5"), 1, 5)
 	if err != nil {
 		t.Fatalf("append after recovery: %v", err)
 	}
 	if offset != 5 {
 		t.Fatalf("append after recovery: offset = %d, want 5", offset)
 	}
-	data, err := p2.Read(5)
+	data, _, err := p2.Read(5)
 	if err != nil || string(data) != "record-5" {
 		t.Fatalf("read offset 5 after recovery: %q, %v, want \"record-5\"", data, err)
 	}

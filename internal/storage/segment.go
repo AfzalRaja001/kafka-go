@@ -5,8 +5,20 @@ import (
 	"os"
 )
 
+// recordHeaderSize is the fixed per-blob header this segment format writes
+// ahead of every blob: a 4-byte payload length, then a 4-byte offset span.
+const recordHeaderSize = 8
+
 // Segment wraps a single append-only log file: write bytes, get back the
 // position they were written at; given a position, read those bytes back.
+//
+// Every blob carries an "offset span" alongside its length - how many log
+// offsets that blob consumes. A blob is a Kafka record batch, and a batch can
+// hold many records, so a single append can advance the log by more than one
+// offset. Segment never parses the batch itself (that's protocol's job and
+// would break the storage/protocol boundary); it only stores the span it was
+// handed, which is enough to rebuild offsets after a restart without any
+// separate bookkeeping file.
 type Segment struct {
 	file *os.File
 	size int64
@@ -30,9 +42,12 @@ func OpenSegment(path string) (*Segment, error) {
 	return s, nil
 }
 
-func (s *Segment) Append(data []byte) (int64, error) {
-	header := make([]byte, 4)
-	binary.BigEndian.PutUint32(header, uint32(len(data)))
+// Append writes data as one blob spanning offsetSpan offsets, returning the
+// byte position it was written at.
+func (s *Segment) Append(data []byte, offsetSpan int32) (int64, error) {
+	header := make([]byte, recordHeaderSize)
+	binary.BigEndian.PutUint32(header[0:4], uint32(len(data)))
+	binary.BigEndian.PutUint32(header[4:8], uint32(offsetSpan))
 
 	position := s.size
 	if _, err := s.file.Write(header); err != nil {
@@ -47,18 +62,21 @@ func (s *Segment) Append(data []byte) (int64, error) {
 
 // ReadAt reads by absolute position, never a shared cursor - this is what
 // makes concurrent reads from multiple goroutines safe (Partition relies on
-// this directly).
-func (s *Segment) ReadAt(position int64) ([]byte, error) {
-	header := make([]byte, 4)
+// this directly). It returns the blob's bytes and the offset span recorded
+// with it, which callers need to know where the next blob's offsets begin.
+func (s *Segment) ReadAt(position int64) ([]byte, int32, error) {
+	header := make([]byte, recordHeaderSize)
 	if _, err := s.file.ReadAt(header, position); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	length := binary.BigEndian.Uint32(header)
+	length := binary.BigEndian.Uint32(header[0:4])
+	offsetSpan := int32(binary.BigEndian.Uint32(header[4:8]))
+
 	data := make([]byte, length)
-	if _, err := s.file.ReadAt(data, position+4); err != nil {
-		return nil, err
+	if _, err := s.file.ReadAt(data, position+recordHeaderSize); err != nil {
+		return nil, 0, err
 	}
-	return data, nil
+	return data, offsetSpan, nil
 }
 
 func (s *Segment) Sync() error {
@@ -71,23 +89,28 @@ func (s *Segment) Size() int64 {
 	return s.size
 }
 
-// RecordCount scans the whole segment and returns how many complete records
-// it holds. Only meaningful right after OpenSegment (whose Recover call
-// already guarantees every record up to s.size is complete) - used to
-// restore Partition's nextOffset counter after a restart, without needing
-// to persist a separate record count anywhere.
-func (s *Segment) RecordCount() (int64, error) {
+// Counts scans the whole segment once and returns both how many blobs it
+// holds and how many offsets those blobs span in total. The two differ
+// whenever any blob is a multi-record batch, and both are needed after a
+// restart: the offset total restores Partition's nextOffset, while the blob
+// total restores its sparse-index counter (which indexes every Nth append,
+// not every Nth offset).
+//
+// Only meaningful right after OpenSegment, whose Recover call guarantees
+// every blob up to s.size is complete. Returning both from a single scan
+// avoids walking the file twice.
+func (s *Segment) Counts() (blobs int64, offsets int64, err error) {
 	var pos int64
-	var count int64
 	for pos < s.size {
-		data, err := s.ReadAt(pos)
+		data, span, err := s.ReadAt(pos)
 		if err != nil {
-			return 0, err
+			return 0, 0, err
 		}
-		pos += 4 + int64(len(data))
-		count++
+		pos += recordHeaderSize + int64(len(data))
+		blobs++
+		offsets += int64(span)
 	}
-	return count, nil
+	return blobs, offsets, nil
 }
 
 func (s *Segment) Close() error {
@@ -100,13 +123,13 @@ func (s *Segment) Close() error {
 func (s *Segment) Recover() error {
 	var pos int64 = 0
 	for pos < s.size {
-		header := make([]byte, 4)
+		header := make([]byte, recordHeaderSize)
 		n, err := s.file.ReadAt(header, pos)
-		if err != nil || n < 4 {
+		if err != nil || n < recordHeaderSize {
 			break
 		}
-		length := binary.BigEndian.Uint32(header)
-		recordEnd := pos + 4 + int64(length)
+		length := binary.BigEndian.Uint32(header[0:4])
+		recordEnd := pos + recordHeaderSize + int64(length)
 		if recordEnd > s.size {
 			break
 		}

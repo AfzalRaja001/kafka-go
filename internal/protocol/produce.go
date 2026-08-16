@@ -117,7 +117,8 @@ func HandleProduce(correlationID int32, requestBody []byte, log storage.Log) ([]
 }
 
 func produceOne(log storage.Log, topic string, partition int32, records []byte) (baseOffset, logAppendTime int64, errorCode int16) {
-	if _, err := ParseRecordBatchHeader(records); err != nil {
+	header, err := ParseRecordBatchHeader(records)
+	if err != nil {
 		return 0, -1, ErrCorruptMessage
 	}
 
@@ -134,7 +135,12 @@ func produceOne(log storage.Log, topic string, partition int32, records []byte) 
 
 	patched := RewriteRecordBatch(records, offset)
 
-	assignedOffset, err := log.Append(topic, partition, patched)
+	// header.RecordCount is how many offsets this batch consumes. Passing it
+	// down is what stops the log from advancing by a single offset per
+	// batch: under-reporting it would make the *next* produce peek a stale
+	// LatestOffset and assign a baseOffset colliding with records this batch
+	// already owns.
+	assignedOffset, err := log.Append(topic, partition, patched, header.RecordCount)
 	if err != nil {
 		return 0, -1, ErrUnknownServerError
 	}

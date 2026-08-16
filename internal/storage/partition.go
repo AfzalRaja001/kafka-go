@@ -74,12 +74,15 @@ func OpenPartition(dir string, segmentMaxBytes int64, indexEvery int32) (*Partit
 	// moment it stopped being active. OpenSegment already ran Recover() on
 	// each one above; this just restores the in-memory counters.
 	active := p.segments[len(p.segments)-1]
-	count, err := active.seg.RecordCount()
+	blobs, offsets, err := active.seg.Counts()
 	if err != nil {
 		return nil, err
 	}
-	p.nextOffset.Store(active.baseOffset + count)
-	p.sinceLastIdx = int32(count % int64(indexEvery))
+	// nextOffset advances by offsets (a batch may span several), while the
+	// sparse-index counter advances by blobs (one index entry every Nth
+	// append). Conflating these two is the bug this file's Counts call fixes.
+	p.nextOffset.Store(active.baseOffset + offsets)
+	p.sinceLastIdx = int32(blobs % int64(indexEvery))
 
 	return p, nil
 }
@@ -132,14 +135,29 @@ func openSegmentGroup(dir string, baseOffset int64) (*segmentGroup, error) {
 	return &segmentGroup{baseOffset: baseOffset, seg: seg, idx: idx, timeindex: timeindex}, nil
 }
 
-// Append writes data and records it at the given timestamp, rolling to a
-// new segment first if the active one has reached segmentMaxBytes. See
-// Decoder.Bytes-style comment history: timestamp comes from the caller,
-// not time.Now() internally, since there's no batch-derived timestamp to
-// use yet (no record batch parsing until Phase 2/3's remaining work).
-func (p *Partition) Append(data []byte, timestamp int64) (int64, error) {
+// Append writes data as one blob spanning offsetSpan offsets, recorded at
+// the given timestamp, rolling to a new segment first if the active one has
+// reached segmentMaxBytes. It returns the blob's base offset - the first of
+// the offsetSpan offsets it now owns.
+//
+// offsetSpan comes from the caller (ultimately a record batch's record
+// count) rather than being derived here, because deriving it would mean
+// parsing Kafka's record batch format inside the storage engine - exactly
+// the protocol/storage coupling the Log interface exists to prevent.
+//
+// timestamp likewise comes from the caller, not time.Now() internally.
+func (p *Partition) Append(data []byte, offsetSpan int32, timestamp int64) (int64, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	// Every append must advance the log by at least one offset. A batch
+	// claiming zero would leave the next append sharing its base offset,
+	// making the earlier blob permanently unreachable (FindRecord would
+	// always resolve that offset to the first one). Real producers never
+	// send empty batches; this is purely defensive.
+	if offsetSpan < 1 {
+		offsetSpan = 1
+	}
 
 	active := p.segments[len(p.segments)-1]
 
@@ -154,7 +172,7 @@ func (p *Partition) Append(data []byte, timestamp int64) (int64, error) {
 		p.sinceLastIdx = 0 // a new segment's index restarts fresh, relative offset 0
 	}
 
-	pos, err := active.seg.Append(data)
+	pos, err := active.seg.Append(data, offsetSpan)
 	if err != nil {
 		return 0, err
 	}
@@ -168,7 +186,7 @@ func (p *Partition) Append(data []byte, timestamp int64) (int64, error) {
 	}
 
 	p.sinceLastIdx = (p.sinceLastIdx + 1) % p.indexEvery
-	p.nextOffset.Add(1)
+	p.nextOffset.Add(int64(offsetSpan))
 
 	return offset, nil
 }
@@ -187,15 +205,24 @@ func (p *Partition) findSegment(offset int64) *segmentGroup {
 	return p.segments[i-1]
 }
 
-func (p *Partition) Read(offset int64) ([]byte, error) {
+// Read returns the batch containing offset, plus the offset immediately
+// after that batch. Callers walking the log forward use the returned next
+// offset rather than incrementing by one, since a batch may span many
+// offsets.
+func (p *Partition) Read(offset int64) (data []byte, nextOffset int64, err error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
 	sg := p.findSegment(offset)
 	if sg == nil {
-		return nil, fmt.Errorf("offset %d out of range", offset)
+		return nil, 0, fmt.Errorf("offset %d out of range", offset)
 	}
-	return FindRecord(sg.seg, sg.idx, int32(offset-sg.baseOffset))
+
+	data, nextRel, err := FindRecord(sg.seg, sg.idx, int32(offset-sg.baseOffset))
+	if err != nil {
+		return nil, 0, err
+	}
+	return data, sg.baseOffset + int64(nextRel), nil
 }
 
 // LogEndOffset is deliberately lock-free: nextOffset doesn't need to be

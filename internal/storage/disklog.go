@@ -94,21 +94,24 @@ func (d *DiskLog) openPartition(topic string, partition int32) (*Partition, erro
 	return p, nil
 }
 
-func (d *DiskLog) Append(topic string, partition int32, batch []byte) (int64, error) {
+func (d *DiskLog) Append(topic string, partition int32, batch []byte, recordCount int32) (int64, error) {
 	p, err := d.getOrCreatePartition(topic, partition)
 	if err != nil {
 		return 0, err
 	}
-	return p.Append(batch, time.Now().UnixMilli())
+	return p.Append(batch, recordCount, time.Now().UnixMilli())
 }
 
 // Read returns up to maxBytes of records starting at offset, by repeatedly
-// reading one Partition record at a time and concatenating until the byte
-// budget is used or reads stop succeeding. Partition.Read doesn't currently
+// reading one batch at a time and concatenating until the byte budget is
+// used or reads stop succeeding. Partition.Read doesn't currently
 // distinguish "reached the end of the log" from a genuine I/O error - both
 // simply stop the loop here and return whatever was collected so far. That
 // distinction matters for Fetch's long-polling logic (Phase 3) and isn't
 // needed yet.
+//
+// The loop advances by the next-offset each batch reports rather than by 1,
+// since one batch can span many offsets.
 func (d *DiskLog) Read(topic string, partition int32, offset int64, maxBytes int32) ([]byte, error) {
 	p, ok := d.getPartition(topic, partition)
 	if !ok {
@@ -117,7 +120,7 @@ func (d *DiskLog) Read(topic string, partition int32, offset int64, maxBytes int
 
 	var out []byte
 	for {
-		data, err := p.Read(offset)
+		data, next, err := p.Read(offset)
 		if err != nil {
 			break
 		}
@@ -125,7 +128,7 @@ func (d *DiskLog) Read(topic string, partition int32, offset int64, maxBytes int
 			break
 		}
 		out = append(out, data...)
-		offset++
+		offset = next
 	}
 	return out, nil
 }
