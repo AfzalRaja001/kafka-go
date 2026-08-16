@@ -106,6 +106,15 @@ func HandleFetch(correlationID int32, requestBody []byte, log storage.Log) ([]by
 			enc.Int32(part.Partition)
 			enc.Int16(errorCode)
 			enc.Int64(highWatermark)
+			// Fetch's records field must be present-but-empty when there's
+			// nothing new (not null): a real Kafka client's parser treats
+			// null here as an unexpected condition, not "caught up," and
+			// chokes trying to construct a batch reader from it. Encoder.Bytes
+			// treats nil as null (the correct general rule for most fields -
+			// this is a Fetch-specific exception, not a codec-wide change).
+			if data == nil {
+				data = []byte{}
+			}
 			enc.Bytes(data)
 		}
 	}
