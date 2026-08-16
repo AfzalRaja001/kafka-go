@@ -82,8 +82,18 @@ func (idx *Index) Close() error {
 }
 
 // FindRecord combines an index lookup with a bounded forward scan through
-// seg to reach the exact target offset.
-func FindRecord(seg *Segment, idx *Index, targetOffset int32) ([]byte, error) {
+// seg to reach the blob *containing* targetOffset, returning that blob's
+// bytes and the offset immediately after it.
+//
+// "Containing" rather than "at" is the important part: a blob is a record
+// batch that may span many offsets, so a target lands inside a batch far
+// more often than exactly on its first offset. Returning the whole
+// containing batch is what real Kafka does too - the broker never splits a
+// batch apart, and the client discards records below its fetch offset.
+//
+// The returned next-offset is what lets a caller walk batch by batch without
+// having to know any batch's length in advance.
+func FindRecord(seg *Segment, idx *Index, targetOffset int32) (data []byte, nextOffset int32, err error) {
 	var pos int64 = 0
 	var offset int32 = 0
 
@@ -92,14 +102,18 @@ func FindRecord(seg *Segment, idx *Index, targetOffset int32) ([]byte, error) {
 		pos = int64(entryPos)
 	}
 
-	for offset < targetOffset {
-		data, err := seg.ReadAt(pos)
+	for {
+		data, span, err := seg.ReadAt(pos)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-		pos += 4 + int64(len(data))
-		offset++
+		if targetOffset < offset+span {
+			return data, offset + span, nil
+		}
+		// pos advances by at least recordHeaderSize every iteration even if
+		// span is somehow 0, so a zero-span blob can't spin this loop
+		// forever - the scan just runs off the end and ReadAt reports EOF.
+		pos += recordHeaderSize + int64(len(data))
+		offset += span
 	}
-
-	return seg.ReadAt(pos)
 }

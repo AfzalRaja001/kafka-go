@@ -56,7 +56,7 @@ func decodeFetchPartitionResponse(t *testing.T, resp []byte) (data []byte, error
 
 func TestHandleFetch_ReturnsImmediatelyWhenDataAvailable(t *testing.T) {
 	log := storage.NewFakeLog()
-	log.Append("orders", 0, []byte("hello"))
+	log.Append("orders", 0, []byte("hello"), 1)
 
 	body := encodeFetchRequest(2000, 0, "orders", 0, 0, 1024)
 
@@ -93,12 +93,12 @@ func TestHandleFetch_ReturnsImmediatelyWhenDataAvailable(t *testing.T) {
 // it's just sleeping, not actually noticing new data).
 func TestHandleFetch_LongPollsUntilDataArrives(t *testing.T) {
 	log := storage.NewFakeLog()
-	log.Append("orders", 0, []byte("seed")) // offset 0 - partition now exists
+	log.Append("orders", 0, []byte("seed"), 1) // offset 0 - partition now exists
 
 	const appendDelay = 100 * time.Millisecond
 	go func() {
 		time.Sleep(appendDelay)
-		log.Append("orders", 0, []byte("late-arrival")) // offset 1
+		log.Append("orders", 0, []byte("late-arrival"), 1) // offset 1
 	}()
 
 	body := encodeFetchRequest(2000, 1, "orders", 0, 1, 1024) // fetch from offset 1 - caught up
@@ -128,7 +128,7 @@ func TestHandleFetch_LongPollsUntilDataArrives(t *testing.T) {
 
 func TestHandleFetch_TimesOutWhenNoDataArrives(t *testing.T) {
 	log := storage.NewFakeLog()
-	log.Append("orders", 0, []byte("x")) // 1 byte - less than minBytes below
+	log.Append("orders", 0, []byte("x"), 1) // 1 byte - less than minBytes below
 
 	const maxWait = 100 * time.Millisecond
 	body := encodeFetchRequest(int32(maxWait.Milliseconds()), 1000, "orders", 0, 0, 1024)
@@ -164,7 +164,7 @@ func TestHandleFetch_TimesOutWhenNoDataArrives(t *testing.T) {
 // unexpected rather than "nothing new yet," and errors trying to read one.
 func TestHandleFetch_EmptyResponseIsNotNull(t *testing.T) {
 	log := storage.NewFakeLog()
-	log.Append("orders", 0, []byte("only-record")) // offset 0 - partition exists
+	log.Append("orders", 0, []byte("only-record"), 1) // offset 0 - partition exists
 
 	const maxWait = 100 * time.Millisecond
 	// Fetch from offset 1: caught up, nothing there, but the partition
@@ -211,8 +211,8 @@ func TestHandleFetch_UnknownTopicPartitionReturnsQuickly(t *testing.T) {
 
 func TestHandleFetch_RespectsMaxBytes(t *testing.T) {
 	log := storage.NewFakeLog()
-	log.Append("orders", 0, []byte("first"))
-	log.Append("orders", 0, []byte("second"))
+	log.Append("orders", 0, []byte("first"), 1)
+	log.Append("orders", 0, []byte("second"), 1)
 
 	body := encodeFetchRequest(100, 0, "orders", 0, 0, 5) // only room for "first"
 

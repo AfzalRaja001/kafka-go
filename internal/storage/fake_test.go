@@ -13,7 +13,7 @@ var _ Log = (*FakeLog)(nil)
 func TestFakeLog_AppendThenRead(t *testing.T) {
 	log := NewFakeLog()
 
-	base, err := log.Append("orders", 0, []byte("batch-one"))
+	base, err := log.Append("orders", 0, []byte("batch-one"), 1)
 	if err != nil {
 		t.Fatalf("Append: %v", err)
 	}
@@ -21,7 +21,7 @@ func TestFakeLog_AppendThenRead(t *testing.T) {
 		t.Fatalf("first append base offset = %d, want 0", base)
 	}
 
-	base, err = log.Append("orders", 0, []byte("batch-two"))
+	base, err = log.Append("orders", 0, []byte("batch-two"), 1)
 	if err != nil {
 		t.Fatalf("Append: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestFakeLog_AppendThenRead(t *testing.T) {
 // partition 1 "exist, but empty" - they're entirely separate partitions.)
 func TestFakeLog_ReadUnknownPartitionErrors(t *testing.T) {
 	log := NewFakeLog()
-	log.Append("orders", 0, []byte("data"))
+	log.Append("orders", 0, []byte("data"), 1)
 
 	if _, err := log.Read("orders", 1, 0, 1024); err == nil {
 		t.Fatal("expected an error reading an unknown partition, got nil")
