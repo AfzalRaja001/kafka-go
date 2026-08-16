@@ -156,6 +156,39 @@ func TestHandleFetch_TimesOutWhenNoDataArrives(t *testing.T) {
 	}
 }
 
+// TestHandleFetch_EmptyResponseIsNotNull is a regression test for a real
+// bug found testing against kafka-python: when a partition exists and is
+// simply caught up (no new records past the fetch offset), the records
+// field must be encoded as present-but-empty (wire length 0), not null
+// (wire length -1). A real client's batch parser treats null here as
+// unexpected rather than "nothing new yet," and errors trying to read one.
+func TestHandleFetch_EmptyResponseIsNotNull(t *testing.T) {
+	log := storage.NewFakeLog()
+	log.Append("orders", 0, []byte("only-record")) // offset 0 - partition exists
+
+	const maxWait = 100 * time.Millisecond
+	// Fetch from offset 1: caught up, nothing there, but the partition
+	// itself is real - this is the exact path that previously encoded a
+	// null records field instead of an empty one.
+	body := encodeFetchRequest(int32(maxWait.Milliseconds()), 1, "orders", 0, 1, 1024)
+
+	resp, err := HandleFetch(1, body, log)
+	if err != nil {
+		t.Fatalf("HandleFetch: %v", err)
+	}
+
+	data, errorCode, _ := decodeFetchPartitionResponse(t, resp)
+	if errorCode != ErrNone {
+		t.Fatalf("error_code = %d, want %d", errorCode, ErrNone)
+	}
+	if data == nil {
+		t.Fatal("records field decoded as null - real clients reject this; it must be present-but-empty")
+	}
+	if len(data) != 0 {
+		t.Errorf("data = %q, want empty", data)
+	}
+}
+
 func TestHandleFetch_UnknownTopicPartitionReturnsQuickly(t *testing.T) {
 	log := storage.NewFakeLog()
 	body := encodeFetchRequest(2000, 1, "missing", 0, 0, 1024)
