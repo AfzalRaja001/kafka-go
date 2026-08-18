@@ -4,6 +4,7 @@ package protocol
 const (
 	ApiKeyProduce     int16 = 0
 	ApiKeyFetch       int16 = 1
+	ApiKeyListOffsets int16 = 2
 	ApiKeyMetadata    int16 = 3
 	ApiKeyApiVersions int16 = 18
 )
@@ -26,6 +27,7 @@ type SupportedAPI struct {
 var SupportedAPIs = []SupportedAPI{
 	{APIKey: ApiKeyProduce, MinVersion: 3, MaxVersion: 3},
 	{APIKey: ApiKeyFetch, MinVersion: 0, MaxVersion: 0},
+	{APIKey: ApiKeyListOffsets, MinVersion: 0, MaxVersion: 0},
 	{APIKey: ApiKeyApiVersions, MinVersion: 0, MaxVersion: 0},
 	{APIKey: ApiKeyMetadata, MinVersion: 0, MaxVersion: 0},
 }
