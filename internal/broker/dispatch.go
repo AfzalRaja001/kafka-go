@@ -38,6 +38,8 @@ func dispatch(msg []byte, registry *protocol.TopicRegistry, brokers []protocol.B
 		return protocol.HandleProduce(correlationID, dec.Remaining(), log)
 	case protocol.ApiKeyFetch:
 		return protocol.HandleFetch(correlationID, dec.Remaining(), log)
+	case protocol.ApiKeyListOffsets:
+		return protocol.HandleListOffsets(correlationID, dec.Remaining(), log)
 	default:
 		return nil, fmt.Errorf("unsupported api_key %d", apiKey)
 	}
