@@ -13,4 +13,12 @@ type Log interface {
 	Read(topic string, partition int32, offset int64, maxBytes int32) ([]byte, error)
 	EarliestOffset(topic string, partition int32) (int64, error)
 	LatestOffset(topic string, partition int32) (int64, error)
+
+	// CreatePartition provisions a topic-partition's storage eagerly, so it
+	// is immediately readable at offset 0 even before anything is Appended.
+	// DeletePartition removes it, including its on-disk data. Both exist
+	// for CreateTopics/DeleteTopics - every other method treats a
+	// topic-partition's existence as something Append alone establishes.
+	CreatePartition(topic string, partition int32) error
+	DeletePartition(topic string, partition int32) error
 }

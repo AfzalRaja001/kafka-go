@@ -116,6 +116,22 @@ func TestNullableString(t *testing.T) {
 	}
 }
 
+func TestBool(t *testing.T) {
+	for _, want := range []bool{true, false} {
+		enc := NewEncoder()
+		enc.Bool(want)
+
+		dec := NewDecoder(enc.Result())
+		got, err := dec.Bool()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != want {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	}
+}
+
 func TestBytes(t *testing.T) {
 	tests := []struct {
 		name string

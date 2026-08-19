@@ -2,6 +2,8 @@ package storage
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -125,6 +127,121 @@ func TestDiskLog_SegmentRolling(t *testing.T) {
 		}
 		if string(data) != want {
 			t.Errorf("offset %d: got %q, want %q", i, data, want)
+		}
+	}
+}
+
+// TestDiskLog_CreatePartitionMakesEmptyTopicReadable pins down the eager-
+// provisioning contract CreateTopics needs: right after CreatePartition,
+// with nothing ever Appended, Read/EarliestOffset/LatestOffset must all
+// succeed as "empty", not error as "unknown topic-partition".
+func TestDiskLog_CreatePartitionMakesEmptyTopicReadable(t *testing.T) {
+	log := NewDiskLog(t.TempDir(), 1<<20, 5)
+	defer log.Close()
+
+	if err := log.CreatePartition("fresh-topic", 0); err != nil {
+		t.Fatalf("CreatePartition: %v", err)
+	}
+
+	earliest, err := log.EarliestOffset("fresh-topic", 0)
+	if err != nil || earliest != 0 {
+		t.Errorf("EarliestOffset = %d, %v, want 0, nil", earliest, err)
+	}
+	latest, err := log.LatestOffset("fresh-topic", 0)
+	if err != nil || latest != 0 {
+		t.Errorf("LatestOffset = %d, %v, want 0, nil", latest, err)
+	}
+	got, err := log.Read("fresh-topic", 0, 0, 1024)
+	if err != nil || len(got) != 0 {
+		t.Errorf("Read = %q, %v, want empty, nil", got, err)
+	}
+}
+
+// TestDiskLog_CreatePartitionIsIdempotent confirms calling CreatePartition
+// twice - which the protocol handler never does today, since it checks the
+// registry first, but which the storage layer's own contract shouldn't rely
+// on callers to avoid - doesn't reopen or wipe an already-populated partition.
+func TestDiskLog_CreatePartitionIsIdempotent(t *testing.T) {
+	log := NewDiskLog(t.TempDir(), 1<<20, 5)
+	defer log.Close()
+
+	log.CreatePartition("orders", 0)
+	log.Append("orders", 0, []byte("first"), 1)
+
+	if err := log.CreatePartition("orders", 0); err != nil {
+		t.Fatalf("second CreatePartition: %v", err)
+	}
+
+	latest, err := log.LatestOffset("orders", 0)
+	if err != nil || latest != 1 {
+		t.Errorf("LatestOffset after re-CreatePartition = %d, %v, want 1, nil", latest, err)
+	}
+}
+
+// TestDiskLog_DeletePartitionRemovesFilesFromDisk is the real-deletion
+// contract DeleteTopics needs: after DeletePartition, the partition
+// directory itself must be gone, not just absent from DiskLog's in-memory
+// map - otherwise a restarted broker would see the "deleted" topic reappear.
+func TestDiskLog_DeletePartitionRemovesFilesFromDisk(t *testing.T) {
+	dir := t.TempDir()
+	log := NewDiskLog(dir, 1<<20, 5)
+	defer log.Close()
+
+	log.Append("orders", 0, []byte("first"), 1)
+	partDir := filepath.Join(dir, "orders-0")
+	if _, err := os.Stat(partDir); err != nil {
+		t.Fatalf("partition dir should exist before delete: %v", err)
+	}
+
+	if err := log.DeletePartition("orders", 0); err != nil {
+		t.Fatalf("DeletePartition: %v", err)
+	}
+
+	if _, err := os.Stat(partDir); !os.IsNotExist(err) {
+		t.Errorf("partition dir should be gone after delete, stat err = %v", err)
+	}
+	if _, err := log.Read("orders", 0, 0, 1024); err == nil {
+		t.Error("expected an error reading a deleted topic-partition, got nil")
+	}
+}
+
+// TestDiskLog_DeletePartitionUnknownIsNotAnError matches the protocol
+// handler's division of labor: DeleteTopics itself checks the registry and
+// returns UNKNOWN_TOPIC_OR_PARTITION before ever calling into storage, so
+// DeletePartition on something that was never created should not need its
+// own error path for that case.
+func TestDiskLog_DeletePartitionUnknownIsNotAnError(t *testing.T) {
+	log := NewDiskLog(t.TempDir(), 1<<20, 5)
+	defer log.Close()
+
+	if err := log.DeletePartition("never-existed", 0); err != nil {
+		t.Errorf("DeletePartition on unknown topic-partition = %v, want nil", err)
+	}
+}
+
+// TestDiskLog_DeletePartitionAfterCreatePartitionAndAppend reproduces the
+// exact sequence CreateTopics + Produce + DeleteTopics drives against a
+// real broker: three partitions provisioned eagerly via CreatePartition,
+// only one of them ever Appended to, then all three deleted. A live test
+// against kafka-python's AdminClient hit UnknownError here even though the
+// simpler single-partition, Append-only-no-CreatePartition case (the
+// existing TestDiskLog_DeletePartitionRemovesFilesFromDisk) passed clean.
+func TestDiskLog_DeletePartitionAfterCreatePartitionAndAppend(t *testing.T) {
+	log := NewDiskLog(t.TempDir(), 1<<20, 5)
+	defer log.Close()
+
+	for p := int32(0); p < 3; p++ {
+		if err := log.CreatePartition("verify-topic", p); err != nil {
+			t.Fatalf("CreatePartition(%d): %v", p, err)
+		}
+	}
+	if _, err := log.Append("verify-topic", 0, []byte("hello"), 1); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	for p := int32(0); p < 3; p++ {
+		if err := log.DeletePartition("verify-topic", p); err != nil {
+			t.Fatalf("DeletePartition(%d): %v", p, err)
 		}
 	}
 }

@@ -153,3 +153,49 @@ The most serious bug so far - a silent data-corruption path, not a crash.
   with a catch-up PR (#9) the first time, and a stash/fetch/ff-merge the
   second.
 - **Caught by:** noticing files had reverted to older content mid-session.
+
+## 8. kafka-python's AdminClient couldn't find a controller
+
+- **Symptom:** `KafkaAdminClient.create_topics()` failed immediately with
+  `NodeNotReadyError: controller`, before the request ever reached this
+  broker's `CreateTopics` handler.
+- **Root cause:** real admin clients read `ControllerId` out of the
+  `Metadata` response to know which broker to send `CreateTopics`/
+  `DeleteTopics` to. `ControllerId` doesn't exist in Metadata v0 - it was
+  added in v1 - and this broker only implemented v0.
+- **Fix:** bumped `Metadata` to v1 (`min=max=1`, replacing v0, the same
+  "exactly one version" pattern every other API here uses). v1 also adds a
+  per-broker `Rack` field and a per-topic `IsInternal` field; both are
+  always encoded as their "not applicable" value (`null`, `false`) rather
+  than becoming new state this broker tracks. See `docs/decisions.md`.
+- **Caught by:** live-testing `CreateTopics` against a real broker with
+  `kafka-python`'s actual `KafkaAdminClient`, rather than only a
+  hand-crafted request - the same discipline that caught the multi-record
+  offset bug (issue 5). A hand-rolled test client would never have hit this,
+  since nothing about the wire format was wrong; the *client's own routing
+  logic* needed a field this broker never sent.
+
+## 9. `DeleteTopics` intermittently failed with "directory is not empty"
+
+- **Symptom:** deleting a freshly created topic against a live broker failed
+  non-deterministically - roughly 2 times out of 3 in repeated live runs -
+  with `UnknownError`, even though the identical Go unit test (single
+  isolated partition, no concurrent connections) always passed.
+- **Root cause:** `os.RemoveAll` on Windows can transiently fail with
+  "directory is not empty" immediately after closing a file that lived in
+  that directory - NTFS hasn't finished releasing the just-closed handle's
+  directory entry yet. The same class of quirk as `Segment.Truncate`
+  (issue 1), but this time hitting deletion instead of truncation, and only
+  reproducible under real OS-level concurrency (a live broker handling real
+  TCP connections), not a single-threaded, single-process unit test.
+- **Fix:** `removeAllWithRetry` in `internal/storage/removeall_retry.go` -
+  retries `os.RemoveAll` up to 5 times with a 20ms delay between attempts.
+  The remove function is injected so the retry logic itself is unit-tested
+  against a fake that fails on command, rather than depending on
+  reproducing a real timing-sensitive race in a test. Confirmed the fix by
+  running the live `kafka-python` verification 5 times in a row post-fix
+  (previously 2 of 3 failed; after the fix, 5 of 5 passed).
+- **Caught by:** live-testing `DeleteTopics` against a real running broker
+  repeatedly, not just once - a single clean run would have looked like
+  success and hidden a bug that would have bitten real usage on Windows
+  roughly two-thirds of the time.

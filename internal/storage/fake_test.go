@@ -65,3 +65,48 @@ func TestFakeLog_ReadUnknownPartitionErrors(t *testing.T) {
 		t.Fatal("expected an error for LatestOffset on an unknown partition, got nil")
 	}
 }
+
+// TestFakeLog_CreatePartitionMakesEmptyTopicReadable mirrors DiskLog's
+// eager-provisioning contract - handler tests against FakeLog need to
+// agree with DiskLog, or a test passing here could still be wrong on disk.
+func TestFakeLog_CreatePartitionMakesEmptyTopicReadable(t *testing.T) {
+	log := NewFakeLog()
+
+	if err := log.CreatePartition("fresh-topic", 0); err != nil {
+		t.Fatalf("CreatePartition: %v", err)
+	}
+
+	earliest, err := log.EarliestOffset("fresh-topic", 0)
+	if err != nil || earliest != 0 {
+		t.Errorf("EarliestOffset = %d, %v, want 0, nil", earliest, err)
+	}
+	latest, err := log.LatestOffset("fresh-topic", 0)
+	if err != nil || latest != 0 {
+		t.Errorf("LatestOffset = %d, %v, want 0, nil", latest, err)
+	}
+	got, err := log.Read("fresh-topic", 0, 0, 1024)
+	if err != nil || len(got) != 0 {
+		t.Errorf("Read = %q, %v, want empty, nil", got, err)
+	}
+}
+
+func TestFakeLog_DeletePartitionRemovesTopic(t *testing.T) {
+	log := NewFakeLog()
+	log.Append("orders", 0, []byte("first"), 1)
+
+	if err := log.DeletePartition("orders", 0); err != nil {
+		t.Fatalf("DeletePartition: %v", err)
+	}
+
+	if _, err := log.Read("orders", 0, 0, 1024); err == nil {
+		t.Error("expected an error reading a deleted partition, got nil")
+	}
+}
+
+func TestFakeLog_DeletePartitionUnknownIsNotAnError(t *testing.T) {
+	log := NewFakeLog()
+
+	if err := log.DeletePartition("never-existed", 0); err != nil {
+		t.Errorf("DeletePartition on unknown partition = %v, want nil", err)
+	}
+}
