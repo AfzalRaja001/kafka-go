@@ -89,6 +89,50 @@ func TestDispatch_Produce(t *testing.T) {
 	}
 }
 
+func TestDispatch_CreateTopics(t *testing.T) {
+	enc := encodeRequestHeader(protocol.ApiKeyCreateTopics, 0, 11, "kcat")
+	enc.Int32(1) // topic count
+	enc.String("orders")
+	enc.Int32(1) // num_partitions
+	enc.Int16(1) // replication_factor
+	enc.Int32(0) // assignments: empty
+	enc.Int32(0) // configs: empty
+	enc.Int32(5000)
+	req := enc.Result()
+
+	resp, err := dispatch(req, protocol.NewTopicRegistry(), nil, storage.NewFakeLog())
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+
+	dec := protocol.NewDecoder(resp)
+	correlationID, _ := dec.Int32()
+	if correlationID != 11 {
+		t.Errorf("correlation_id = %d, want 11", correlationID)
+	}
+}
+
+func TestDispatch_DeleteTopics(t *testing.T) {
+	registry := protocol.NewTopicRegistry()
+	registry.AddTopic(&protocol.Topic{Name: "orders"})
+
+	enc := encodeRequestHeader(protocol.ApiKeyDeleteTopics, 0, 12, "kcat")
+	enc.StringArray([]string{"orders"})
+	enc.Int32(5000)
+	req := enc.Result()
+
+	resp, err := dispatch(req, registry, nil, storage.NewFakeLog())
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+
+	dec := protocol.NewDecoder(resp)
+	correlationID, _ := dec.Int32()
+	if correlationID != 12 {
+		t.Errorf("correlation_id = %d, want 12", correlationID)
+	}
+}
+
 func TestDispatch_UnsupportedApiKey(t *testing.T) {
 	req := encodeRequestHeader(999, 0, 1, "kcat").Result()
 

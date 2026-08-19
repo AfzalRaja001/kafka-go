@@ -42,6 +42,12 @@ func (r *TopicRegistry) AddTopic(t *Topic) {
 	r.topics[t.Name] = t
 }
 
+func (r *TopicRegistry) RemoveTopic(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.topics, name)
+}
+
 func (r *TopicRegistry) Get(name string) (*Topic, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -59,10 +65,19 @@ func (r *TopicRegistry) All() []*Topic {
 	return result
 }
 
-// HandleMetadata builds a Metadata v0 response body. requestBody is
+// HandleMetadata builds a Metadata v1 response body. requestBody is
 // whatever bytes remain after the shared request header has already been
 // decoded - here, just a topics array (a null array, encoded as count -1,
 // means "describe every topic this broker knows about").
+//
+// v1 (rather than v0) is what this broker speaks because a real
+// CreateTopics/DeleteTopics client needs ControllerId to know which broker
+// to send those requests to - kafka-python's AdminClient reads it straight
+// out of Metadata and fails with NodeNotReadyError without it. Broker.Rack
+// and Topic.IsInternal are the two other fields v1 adds; this broker has no
+// rack concept and no internal topics, so both are always encoded as their
+// "not applicable" value (null, false) rather than becoming new broker
+// state to track.
 func HandleMetadata(correlationID int32, requestBody []byte, registry *TopicRegistry, brokers []Broker) ([]byte, error) {
 	dec := NewDecoder(requestBody)
 	requestedTopics, err := dec.StringArray()
@@ -78,7 +93,18 @@ func HandleMetadata(correlationID int32, requestBody []byte, registry *TopicRegi
 		enc.Int32(b.NodeID)
 		enc.String(b.Host)
 		enc.Int32(b.Port)
+		enc.NullableString(nil) // rack: not modeled on a single-node broker
 	}
+
+	// The controller is whichever broker accepts CreateTopics/DeleteTopics.
+	// On this single-node broker that's always the one broker there is; -1
+	// (real Kafka's "no controller" sentinel) only if brokers is somehow
+	// empty, which never happens in practice but shouldn't crash if it did.
+	controllerID := int32(-1)
+	if len(brokers) > 0 {
+		controllerID = brokers[0].NodeID
+	}
+	enc.Int32(controllerID)
 
 	names := requestedTopics
 	if names == nil {
@@ -93,12 +119,14 @@ func HandleMetadata(correlationID int32, requestBody []byte, registry *TopicRegi
 		if !found {
 			enc.Int16(ErrUnknownTopicOrPartition)
 			enc.String(name)
+			enc.Bool(false) // is_internal
 			enc.Int32(0)
 			continue
 		}
 
 		enc.Int16(ErrNone)
 		enc.String(topic.Name)
+		enc.Bool(false) // is_internal: no internal topics exist yet
 		enc.Int32(int32(len(topic.Partitions)))
 		for _, p := range topic.Partitions {
 			enc.Int16(ErrNone)

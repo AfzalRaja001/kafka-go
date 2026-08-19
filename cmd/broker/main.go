@@ -27,16 +27,10 @@ func main() {
 	diskLog := storage.NewDiskLog(dataDir, segmentMaxBytes, indexEvery)
 	defer diskLog.Close()
 
+	// No hardcoded topic anymore: CreateTopics (api_key 19) now provisions
+	// topics for real, in both the registry and storage. A fresh broker
+	// starts with none, matching real Kafka.
 	registry := protocol.NewTopicRegistry()
-	// Hardcoded per the build plan's Phase 1 instructions - there's no
-	// CreateTopics yet, so a fake topic is what makes `kcat -L` show
-	// something meaningful.
-	registry.AddTopic(&protocol.Topic{
-		Name: "test-topic",
-		Partitions: []protocol.PartitionMetadata{
-			{ID: 0, Leader: 1, Replicas: []int32{1}, ISR: []int32{1}},
-		},
-	})
 
 	brokers := []protocol.Broker{
 		{NodeID: 1, Host: "localhost", Port: 9092},

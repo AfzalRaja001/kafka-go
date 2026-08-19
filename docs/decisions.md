@@ -57,6 +57,51 @@ the span it was handed. One consequence worth naming: this is an on-disk format 
 `data/` directory is unreadable by the new code. That's free right now because nothing persistent exists
 yet, and it would be a migration problem later - a reason to get the format right early rather than late.
 
+## 2026-08-18 - `CreateTopics`/`DeleteTopics` provision storage eagerly, for real
+
+`CreateTopics` extends the frozen `Log` interface a second time -
+`CreatePartition`/`DeletePartition` - rather than staying registry-only.
+The alternative (only writing to `TopicRegistry`, leaving storage to keep
+being created lazily on first `Produce`, exactly as it already was) was
+rejected because it would leave a real gap from real Kafka: a freshly
+created, never-produced-to topic would error on `Fetch`/`ListOffsets`
+instead of reading back as empty at offset 0. `DiskLog.CreatePartition`
+needed no new logic - it's just a new exported entry point onto the
+already-existing `openPartition`, which Append already used lazily.
+
+`CreateTopics` also honors the client's requested partition count for
+real, rather than clamping to 1 the way most other APIs here simplify to a
+single version/case. The storage layer already keys everything by
+`(topic, partition)` and `Metadata` already returns a partition list per
+topic; honoring the real count only means driving what already existed
+with a real number instead of always 1, not new complexity.
+
+`DeleteTopics` does real deletion - closing open file handles, then
+removing the partition directory from disk - rather than a registry-only
+soft delete that would leave orphaned files behind. This is what
+surfaced issue 9 (the Windows `os.RemoveAll` race): real deletion is more
+work and more risk than a soft delete, but a soft delete would have been
+dishonest about what `DeleteTopics` means, and Kafka on Windows needing a
+retry loop here is exactly the kind of gap the manual live-testing
+discipline exists to catch before it looks like the feature works.
+
+## 2026-08-18 - `Metadata` bumped from v0 to v1 for `ControllerId`
+
+Every other API in this broker deliberately advertises the lowest version
+that does what's needed, to avoid flexible-version (KIP-482) encoding.
+`Metadata` was v0 until this changed it to v1 - discovered as a real,
+not hypothetical, gap: `kafka-python`'s actual `KafkaAdminClient` failed
+outright (`NodeNotReadyError: controller`) because `ControllerId` (which
+tells a client which broker to send `CreateTopics`/`DeleteTopics` to)
+doesn't exist before Metadata v1. Since this broker is single-node,
+`ControllerId` is always the one broker there is - not a new piece of
+state to track, just one more field in an already-known value. v1's other
+two new fields (`Rack` per broker, `IsInternal` per topic) are encoded as
+their "not applicable" value and don't add any state either. Rejected:
+staying at v0 and hand-crafting `CreateTopics`/`DeleteTopics` requests in
+tests only - that would have "tested" the feature without ever proving a
+real client could use it, exactly the gap issue 8 was about.
+
 ## 2026-08-16 - `ListOffsets` v0 resolves only the two timestamp sentinels
 
 Kafka's `ListOffsets` asks "what offset holds the first record at or after timestamp T", where `-1` and `-2`

@@ -38,6 +38,14 @@ func (d *Decoder) Int8() (int8, error) {
 	return v, nil
 }
 
+func (d *Decoder) Bool() (bool, error) {
+	v, err := d.Int8()
+	if err != nil {
+		return false, fmt.Errorf("bool: %w", err)
+	}
+	return v != 0, nil
+}
+
 func (d *Decoder) Int16() (int16, error) {
 	if d.pos+2 > len(d.buf) {
 		return 0, fmt.Errorf("int16: %w", ErrNotEnoughData)
@@ -164,6 +172,14 @@ func NewEncoder() *Encoder {
 
 func (e *Encoder) Int8(v int8) {
 	e.buf.WriteByte(byte(v))
+}
+
+func (e *Encoder) Bool(v bool) {
+	if v {
+		e.Int8(1)
+		return
+	}
+	e.Int8(0)
 }
 
 func (e *Encoder) Int16(v int16) {
