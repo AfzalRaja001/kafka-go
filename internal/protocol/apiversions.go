@@ -2,13 +2,16 @@ package protocol
 
 // Kafka api_key values this broker implements.
 const (
-	ApiKeyProduce      int16 = 0
-	ApiKeyFetch        int16 = 1
-	ApiKeyListOffsets  int16 = 2
-	ApiKeyMetadata     int16 = 3
-	ApiKeyApiVersions  int16 = 18
-	ApiKeyCreateTopics int16 = 19
-	ApiKeyDeleteTopics int16 = 20
+	ApiKeyProduce         int16 = 0
+	ApiKeyFetch           int16 = 1
+	ApiKeyListOffsets     int16 = 2
+	ApiKeyMetadata        int16 = 3
+	ApiKeyOffsetCommit    int16 = 8
+	ApiKeyOffsetFetch     int16 = 9
+	ApiKeyFindCoordinator int16 = 10
+	ApiKeyApiVersions     int16 = 18
+	ApiKeyCreateTopics    int16 = 19
+	ApiKeyDeleteTopics    int16 = 20
 )
 
 type SupportedAPI struct {
@@ -33,6 +36,9 @@ var SupportedAPIs = []SupportedAPI{
 	{APIKey: ApiKeyListOffsets, MinVersion: 0, MaxVersion: 0},
 	{APIKey: ApiKeyApiVersions, MinVersion: 0, MaxVersion: 0},
 	{APIKey: ApiKeyMetadata, MinVersion: 1, MaxVersion: 1},
+	{APIKey: ApiKeyOffsetCommit, MinVersion: 0, MaxVersion: 0},
+	{APIKey: ApiKeyOffsetFetch, MinVersion: 0, MaxVersion: 0},
+	{APIKey: ApiKeyFindCoordinator, MinVersion: 0, MaxVersion: 0},
 	{APIKey: ApiKeyCreateTopics, MinVersion: 0, MaxVersion: 0},
 	{APIKey: ApiKeyDeleteTopics, MinVersion: 0, MaxVersion: 0},
 }
