@@ -36,8 +36,14 @@ func TestHandleMetadata_KnownTopic(t *testing.T) {
 	nodeID, _ := dec.Int32()
 	host, _ := dec.String()
 	port, _ := dec.Int32()
-	if nodeID != 1 || host != "localhost" || port != 9092 {
-		t.Fatalf("broker = (%d, %q, %d), want (1, localhost, 9092)", nodeID, host, port)
+	rack, _ := dec.NullableString()
+	if nodeID != 1 || host != "localhost" || port != 9092 || rack != nil {
+		t.Fatalf("broker = (%d, %q, %d, %v), want (1, localhost, 9092, nil)", nodeID, host, port, rack)
+	}
+
+	controllerID, _ := dec.Int32()
+	if controllerID != 1 {
+		t.Fatalf("controller_id = %d, want 1 (the only broker, on a single-node broker)", controllerID)
 	}
 
 	topicCount, _ := dec.Int32()
@@ -46,8 +52,9 @@ func TestHandleMetadata_KnownTopic(t *testing.T) {
 	}
 	topicErr, _ := dec.Int16()
 	topicName, _ := dec.String()
-	if topicErr != ErrNone || topicName != "orders" {
-		t.Fatalf("topic = (%d, %q), want (0, orders)", topicErr, topicName)
+	isInternal, _ := dec.Bool()
+	if topicErr != ErrNone || topicName != "orders" || isInternal {
+		t.Fatalf("topic = (%d, %q, %v), want (0, orders, false)", topicErr, topicName, isInternal)
 	}
 	partCount, _ := dec.Int32()
 	if partCount != 1 {
@@ -76,6 +83,7 @@ func TestHandleMetadata_UnknownTopic(t *testing.T) {
 
 	dec.Int32() // correlation_id
 	dec.Int32() // broker count (0)
+	dec.Int32() // controller_id
 	topicCount, _ := dec.Int32()
 	if topicCount != 1 {
 		t.Fatalf("topic count = %d, want 1", topicCount)
@@ -100,9 +108,28 @@ func TestHandleMetadata_NilRequestedTopicsReturnsAll(t *testing.T) {
 
 	dec.Int32() // correlation_id
 	dec.Int32() // broker count
+	dec.Int32() // controller_id
 	topicCount, _ := dec.Int32()
 	if topicCount != 2 {
 		t.Fatalf("topic count = %d, want 2", topicCount)
+	}
+}
+
+// TestTopicRegistry_RemoveTopicMakesItUnknown is RemoveTopic's whole
+// contract: after removal, Get must report the topic as gone - the
+// counterpart to AddTopic, needed for DeleteTopics.
+func TestTopicRegistry_RemoveTopicMakesItUnknown(t *testing.T) {
+	registry := NewTopicRegistry()
+	registry.AddTopic(&Topic{Name: "orders"})
+
+	if _, ok := registry.Get("orders"); !ok {
+		t.Fatal("orders should exist before RemoveTopic")
+	}
+
+	registry.RemoveTopic("orders")
+
+	if _, ok := registry.Get("orders"); ok {
+		t.Error("orders should not exist after RemoveTopic")
 	}
 }
 

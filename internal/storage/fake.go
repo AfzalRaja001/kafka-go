@@ -112,3 +112,26 @@ func (f *FakeLog) LatestOffset(topic string, partition int32) (int64, error) {
 	}
 	return f.endOffsetLocked(key), nil
 }
+
+// CreatePartition seeds an empty (non-nil-in-the-map) batch slice for the
+// key, so Read/EarliestOffset/LatestOffset's existence check - which keys
+// off whether the map entry is present at all, not whether it's empty -
+// treats this topic-partition as existing from this point on.
+func (f *FakeLog) CreatePartition(topic string, partition int32) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	key := logKey{topic, partition}
+	if _, ok := f.batches[key]; !ok {
+		f.batches[key] = []fakeBatch{}
+	}
+	return nil
+}
+
+func (f *FakeLog) DeletePartition(topic string, partition int32) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	delete(f.batches, logKey{topic, partition})
+	return nil
+}

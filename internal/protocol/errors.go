@@ -8,4 +8,6 @@ const (
 	ErrUnknownTopicOrPartition int16 = 3
 	ErrCorruptMessage          int16 = 2
 	ErrUnsupportedVersion      int16 = 35
+	ErrTopicAlreadyExists      int16 = 36
+	ErrInvalidPartitions       int16 = 37
 )

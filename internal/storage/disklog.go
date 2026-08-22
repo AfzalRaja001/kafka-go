@@ -102,6 +102,41 @@ func (d *DiskLog) Append(topic string, partition int32, batch []byte, recordCoun
 	return p.Append(batch, recordCount, time.Now().UnixMilli())
 }
 
+// CreatePartition provisions a topic-partition's storage eagerly - the
+// entry point CreateTopics uses so a freshly created, never-produced-to
+// topic is immediately Fetch/ListOffsets-able at offset 0, rather than
+// erroring until the first Produce the way implicit creation always has.
+// It's the same underlying operation Append already performs lazily via
+// getOrCreatePartition; calling it twice is harmless, since openPartition
+// returns the already-open Partition unchanged.
+func (d *DiskLog) CreatePartition(topic string, partition int32) error {
+	_, err := d.openPartition(topic, partition)
+	return err
+}
+
+// DeletePartition closes the partition's open file handles - required
+// before removing its directory, since an open handle blocks deletion on
+// Windows - then removes the directory from disk. A topic-partition that
+// was never created is treated as already deleted rather than an error:
+// the protocol layer's DeleteTopics handler is what checks the registry
+// and returns UNKNOWN_TOPIC_OR_PARTITION, so by the time this is called
+// the caller has already established the topic is supposed to exist.
+func (d *DiskLog) DeletePartition(topic string, partition int32) error {
+	d.mu.Lock()
+	key := logKey{topic, partition}
+	if p, ok := d.parts[key]; ok {
+		if err := p.Close(); err != nil {
+			d.mu.Unlock()
+			return err
+		}
+		delete(d.parts, key)
+	}
+	d.mu.Unlock()
+
+	partDir := filepath.Join(d.dir, fmt.Sprintf("%s-%d", topic, partition))
+	return removeAllWithRetry(os.RemoveAll, partDir, 5, 20*time.Millisecond)
+}
+
 // Read returns up to maxBytes of records starting at offset, by repeatedly
 // reading one batch at a time and concatenating until the byte budget is
 // used or reads stop succeeding. Partition.Read doesn't currently

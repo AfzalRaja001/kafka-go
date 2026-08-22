@@ -10,6 +10,8 @@ const (
 	ApiKeyOffsetFetch     int16 = 9
 	ApiKeyFindCoordinator int16 = 10
 	ApiKeyApiVersions     int16 = 18
+	ApiKeyCreateTopics    int16 = 19
+	ApiKeyDeleteTopics    int16 = 20
 )
 
 type SupportedAPI struct {
@@ -19,23 +21,26 @@ type SupportedAPI struct {
 }
 
 // SupportedAPIs lists every API this broker currently implements. Every
-// max version is deliberately low (0) so a negotiating client never ends
-// up using flexible-version (KIP-482) encoding, which is a fundamentally
-// different, varint-based wire format this broker doesn't implement.
-// Produce is the one exception to "everything is v0": versions 0-2 use
-// Kafka's old message-set format, and only v3+ requires the modern record
-// batch format (magic byte 2) this broker implements. min=max=3 - "exactly
-// one version, the simplest one that does what we need" - the same pattern
-// as every other API here, just landing on a different version.
+// max version is deliberately low so a negotiating client never ends up
+// using flexible-version (KIP-482) encoding, which is a fundamentally
+// different, varint-based wire format this broker doesn't implement. Two
+// APIs land above v0, both for the same reason - v0 genuinely lacks a field
+// real clients need: Produce (min=max=3) needs the modern record batch
+// format (magic byte 2), and Metadata (min=max=1) needs ControllerId so an
+// admin client's CreateTopics/DeleteTopics knows which broker to talk to.
+// Every other API is min=max=0 - "exactly one version, the simplest one
+// that does what we need."
 var SupportedAPIs = []SupportedAPI{
 	{APIKey: ApiKeyProduce, MinVersion: 3, MaxVersion: 3},
 	{APIKey: ApiKeyFetch, MinVersion: 0, MaxVersion: 0},
 	{APIKey: ApiKeyListOffsets, MinVersion: 0, MaxVersion: 0},
 	{APIKey: ApiKeyApiVersions, MinVersion: 0, MaxVersion: 0},
-	{APIKey: ApiKeyMetadata, MinVersion: 0, MaxVersion: 0},
+	{APIKey: ApiKeyMetadata, MinVersion: 1, MaxVersion: 1},
 	{APIKey: ApiKeyOffsetCommit, MinVersion: 0, MaxVersion: 0},
 	{APIKey: ApiKeyOffsetFetch, MinVersion: 0, MaxVersion: 0},
 	{APIKey: ApiKeyFindCoordinator, MinVersion: 0, MaxVersion: 0},
+	{APIKey: ApiKeyCreateTopics, MinVersion: 0, MaxVersion: 0},
+	{APIKey: ApiKeyDeleteTopics, MinVersion: 0, MaxVersion: 0},
 }
 
 const maxSupportedApiVersionsVersion = 0
