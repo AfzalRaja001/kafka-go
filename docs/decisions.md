@@ -66,3 +66,30 @@ are what `seek_to_beginning()` / `seek_to_end()` send and therefore what unblock
 timestamp lookup is deferred rather than faked - `Partition.LookupOffsetByTimestamp` already exists in the
 storage layer, so wiring it up later is small, and returning a wrong answer now would be worse than
 returning an honest "not implemented".
+
+## 2026-08-19 - `OffsetStore` is a new interface, not an extension of `Log`
+
+Phase 4's offset storage (`FindCoordinator`, `OffsetCommit`, `OffsetFetch`) needed somewhere to persist
+`(group, topic, partition) -> offset`. We added a dedicated `OffsetStore` interface in `internal/group/`
+rather than extending `storage.Log` a third time, because the shape is fundamentally different: `Log` stores
+opaque byte batches spanning many offsets each; an offset commit is one int64 plus a metadata string, keyed
+by group as well as topic-partition. Forcing that through `Log`'s `Append`/`Read` methods would mean
+inventing a fake batch format for a single integer, purely to reuse an interface that doesn't fit.
+
+The first (only, for now) implementation, `InMemoryOffsetStore`, is a plain mutex-guarded map - matching the
+plan's own two-step guidance (simple store first, `__consumer_offsets`-backed later, once Track A's
+rebalance flow exists to actually exercise commit-then-resume end to end). `Commit` still returns an `error`
+even though this implementation can never produce one, the same reasoning `Log`'s methods all return `error`
+even where `FakeLog` trivially can't fail: the interface is designed for the implementation that replaces
+this one, not just today's.
+
+`internal/group` depends on nothing else in this project - no import of `protocol` or `storage`. That keeps
+the dependency graph a one-way fan-out (`broker` -> `protocol` -> `{storage, group}`), matching the build
+plan's rule to keep `protocol` and `storage` free of dependencies on each other, now extended to `group` too.
+
+One discovery from live-testing worth recording: `kafka-python`'s `KafkaAdminClient.list_group_offsets`
+accepts `None` as "fetch all committed offsets for a group" - but that requires `OffsetFetch` v2+, which adds
+a nullable topics array. This broker only implements v0, where the topics array is never nullable and the
+client must always name explicit partitions. Passing `None` against this broker raises
+`UnsupportedVersionError` client-side, not a broker error - the client checks its own negotiated version
+before ever sending the request. Verification always passes an explicit `[TopicPartition(...)]` list instead.

@@ -7,6 +7,7 @@ import (
 	"os/signal"
 
 	"github.com/AfzalRaja001/kafka-go/internal/broker"
+	"github.com/AfzalRaja001/kafka-go/internal/group"
 	"github.com/AfzalRaja001/kafka-go/internal/protocol"
 	"github.com/AfzalRaja001/kafka-go/internal/storage"
 )
@@ -42,11 +43,13 @@ func main() {
 		{NodeID: 1, Host: "localhost", Port: 9092},
 	}
 
+	offsets := group.NewInMemoryOffsetStore()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
 	log.Printf("kafka-go broker listening on %s", listenAddr)
-	if err := broker.Serve(ctx, listenAddr, registry, brokers, diskLog); err != nil {
+	if err := broker.Serve(ctx, listenAddr, registry, brokers, diskLog, offsets); err != nil {
 		log.Fatalf("broker: %v", err)
 	}
 	log.Println("kafka-go broker stopped")
