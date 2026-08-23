@@ -11,7 +11,7 @@ import (
 // dispatch decodes the request header every Kafka request shares
 // (api_key, api_version, correlation_id, client_id), then routes to
 // whichever handler owns that api_key, passing it whatever bytes remain.
-func dispatch(msg []byte, registry *protocol.TopicRegistry, brokers []protocol.Broker, log storage.Log, offsets group.OffsetStore) ([]byte, error) {
+func dispatch(msg []byte, registry *protocol.TopicRegistry, brokers []protocol.Broker, log storage.Log, offsets group.OffsetStore, coord *group.Coordinator) ([]byte, error) {
 	dec := protocol.NewDecoder(msg)
 
 	apiKey, err := dec.Int16()
@@ -61,6 +61,14 @@ func dispatch(msg []byte, registry *protocol.TopicRegistry, brokers []protocol.B
 		return protocol.HandleOffsetCommit(correlationID, dec.Remaining(), offsets)
 	case protocol.ApiKeyOffsetFetch:
 		return protocol.HandleOffsetFetch(correlationID, dec.Remaining(), offsets)
+	case protocol.ApiKeyJoinGroup:
+		return protocol.HandleJoinGroup(correlationID, dec.Remaining(), coord)
+	case protocol.ApiKeySyncGroup:
+		return protocol.HandleSyncGroup(correlationID, dec.Remaining(), coord)
+	case protocol.ApiKeyHeartbeat:
+		return protocol.HandleHeartbeat(correlationID, dec.Remaining(), coord)
+	case protocol.ApiKeyLeaveGroup:
+		return protocol.HandleLeaveGroup(correlationID, dec.Remaining(), coord)
 	default:
 		return nil, fmt.Errorf("unsupported api_key %d", apiKey)
 	}
