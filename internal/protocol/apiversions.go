@@ -9,6 +9,10 @@ const (
 	ApiKeyOffsetCommit    int16 = 8
 	ApiKeyOffsetFetch     int16 = 9
 	ApiKeyFindCoordinator int16 = 10
+	ApiKeyJoinGroup       int16 = 11
+	ApiKeyHeartbeat       int16 = 12
+	ApiKeyLeaveGroup      int16 = 13
+	ApiKeySyncGroup       int16 = 14
 	ApiKeyApiVersions     int16 = 18
 	ApiKeyCreateTopics    int16 = 19
 	ApiKeyDeleteTopics    int16 = 20
@@ -39,6 +43,10 @@ var SupportedAPIs = []SupportedAPI{
 	{APIKey: ApiKeyOffsetCommit, MinVersion: 0, MaxVersion: 0},
 	{APIKey: ApiKeyOffsetFetch, MinVersion: 0, MaxVersion: 0},
 	{APIKey: ApiKeyFindCoordinator, MinVersion: 0, MaxVersion: 0},
+	{APIKey: ApiKeyJoinGroup, MinVersion: 0, MaxVersion: 0},
+	{APIKey: ApiKeyHeartbeat, MinVersion: 0, MaxVersion: 0},
+	{APIKey: ApiKeyLeaveGroup, MinVersion: 0, MaxVersion: 0},
+	{APIKey: ApiKeySyncGroup, MinVersion: 0, MaxVersion: 0},
 	{APIKey: ApiKeyCreateTopics, MinVersion: 0, MaxVersion: 0},
 	{APIKey: ApiKeyDeleteTopics, MinVersion: 0, MaxVersion: 0},
 }

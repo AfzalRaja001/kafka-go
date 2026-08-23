@@ -138,3 +138,48 @@ a nullable topics array. This broker only implements v0, where the topics array 
 client must always name explicit partitions. Passing `None` against this broker raises
 `UnsupportedVersionError` client-side, not a broker error - the client checks its own negotiated version
 before ever sending the request. Verification always passes an explicit `[TopicPartition(...)]` list instead.
+
+## 2026-08-22 - `group.Coordinator`'s concurrency model is a channel-close broadcast
+
+Track A's rebalance state machine (`JoinGroup`/`SyncGroup`/`Heartbeat`/`LeaveGroup`) needed a way to hold
+several goroutines - each a different client connection - blocked together until a rebalance window closes,
+then release them all at once with a consistent outcome. `Coordinator` does this with a plain `chan
+struct{}` per group: every joining goroutine registers itself under the group's mutex, then blocks reading
+from the group's current `joinBarrier`; the window's timer closes that channel, which is a one-shot broadcast
+to every blocked reader with no polling and no missed-wakeup races. `SyncGroup`'s leader-to-followers handoff
+uses the identical pattern with its own `syncBarrier`. `sync.Cond` was the alternative considered and
+rejected - it does the same job but is easy to get wrong (a signal sent before a waiter calls `Wait()` under
+the right lock is simply lost), where closing a channel is safe regardless of ordering between the close and
+any given reader arriving at its receive.
+
+Rejected alternative for the wait itself: polling `Coordinator` state on a short sleep loop from each
+goroutine. Works, but wastes CPU and adds latency jitter for no benefit when a real broadcast primitive is
+available.
+
+## 2026-08-22 - The rebalance window's timeout is broker-configured, not client-supplied
+
+`Coordinator.JoinGroup` originally used the request's own `SessionTimeoutMs` as the join window's duration -
+seemed reasonable, since that's the only timeout-shaped field in the request. Live testing found this was
+wrong (`docs/issues.md` issue 11): `kafka-python` sends a 30-second default session timeout, and no real
+client's own poll loop waits anywhere near that long for a response, so `JoinGroup` looked like it hung.
+
+Real Kafka's actual design keeps these genuinely separate: `SessionTimeoutMs` is how long a member can go
+quiet before being considered dead (governs `Heartbeat` expiry), while the join window for a freshly-forming
+group is a broker-side setting, `group.initial.rebalance.delay.ms` (3 seconds by default) - not something the
+client requests at all. `Coordinator` now takes that delay as a constructor parameter, matching how
+`storage.NewDiskLog` already takes `segmentMaxBytes`/`indexEvery` rather than hardcoding them: a real default
+in `main.go`, short values in tests so the suite doesn't spend real wall-clock seconds waiting on windows that
+exist to test timing behavior, not to be fast.
+
+## 2026-08-22 - Protocol selection picks the first name common to every member, not full voting
+
+Real Kafka's actual algorithm for choosing which assignment protocol (e.g. `range`, `roundrobin`) a group
+uses is a cross-member voting scheme over each member's ranked preference list. `Coordinator` instead takes
+the intersection of every joined member's supported protocol names and picks whichever name appears earliest
+in the first joiner's list. This is correct for every scenario this project's clients actually produce - every
+member in a test run proposes the same protocol name(s) - and full voting would be real complexity with
+nothing here to exercise the cases where it would differ from the simplification. `SyncGroup`'s
+follower-wait is bounded by the member's own session timeout rather than waiting forever, a real (if narrow)
+gap real Kafka closes with more machinery: if the leader crashes between `JoinGroup` and `SyncGroup`, a
+follower here times out (`ErrSyncTimedOut`, mapped to `REBALANCE_IN_PROGRESS`) rather than hanging - not
+handled today is *automatically retriggering* a fresh rebalance in that case, left for whoever hits it.

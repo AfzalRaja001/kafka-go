@@ -199,3 +199,67 @@ The most serious bug so far - a silent data-corruption path, not a crash.
   repeatedly, not just once - a single clean run would have looked like
   success and hidden a bug that would have bitten real usage on Windows
   roughly two-thirds of the time.
+
+## 10. CI never ran at all on PR #17 - not even a pending run
+
+- **Symptom:** `gh pr checks 17` showed only the CodeRabbit check; `gh run
+  list` and even the raw Actions API showed zero workflow runs for the
+  branch, not a queued or failed one - the `pull_request` trigger appeared
+  not to fire at all.
+- **Root cause:** `group/find-coordinator-and-offsets` was branched before
+  PR #16 (`CreateTopics`/`DeleteTopics` + `Metadata` v1) merged into `main`,
+  and both branches edited the same regions of `dispatch.go`,
+  `dispatch_test.go`, and `apiversions.go`. That produced real, file-level
+  merge conflicts - `gh pr view --json mergeable` reported `CONFLICTING`.
+  Unlike PR #14's earlier CI issue (`docs/issues.md` entry 7-adjacent, a
+  *stale but still mergeable* base), GitHub Actions apparently can't
+  construct the synthetic merge-preview commit a `pull_request` trigger
+  needs to check out when the merge genuinely fails - so the workflow never
+  starts, rather than starting and failing.
+- **Fix:** `git merge origin/main` into the PR branch, resolved the three
+  conflicting files by hand (combining both PRs' additions rather than
+  picking one side), verified with `go build`/`vet`/`test -race` plus a
+  live smoke test exercising both PRs' handlers together against one
+  broker, then pushed the merge commit. CI started and passed within
+  seconds of the push.
+- **Caught by:** checking `gh pr view --json mergeable` after CI didn't
+  show up where expected, instead of assuming a slow runner or a
+  misconfigured workflow.
+- **Lesson:** "CI didn't run" and "CI ran and failed" are different
+  failure modes with different causes - the first is often a merge
+  conflict blocking the synthetic ref entirely, worth checking
+  `mergeable` status before debugging the workflow itself.
+
+## 11. `JoinGroup` waited for the client's 30-second session timeout instead of ~3 seconds
+
+- **Symptom:** a real `kafka-python` `KafkaConsumer.subscribe()` + `poll()`
+  never returned a single message. Debug logging showed `JoinGroup` sent
+  successfully, then nothing - the client's own `poll(timeout_ms=5000)`
+  gave up and returned empty before the broker ever responded.
+- **Root cause:** `Coordinator.JoinGroup`'s rebalance window used
+  `SessionTimeoutMs` straight from the request as the join-window timer.
+  `kafka-python` sends `session_timeout_ms=30000` by default, so a
+  first-time joiner's `JoinGroup` call was blocking for a full 30 seconds -
+  far longer than any real client's own poll loop is willing to wait.
+  Real Kafka doesn't use the session timeout for this at all: a fresh
+  group's first join window is governed by a separate broker-side setting,
+  `group.initial.rebalance.delay.ms` (3 seconds by default), completely
+  independent of whatever timeout the client requested.
+- **Fix:** `Coordinator` now takes an `initialRebalanceDelay` at
+  construction (3s in `main.go`, short values in tests) and uses it for the
+  join window's timer instead of `SessionTimeoutMs`. `SessionTimeoutMs` is
+  still used for what it actually governs: `Heartbeat`'s expiry threshold
+  and `SyncGroup`'s follower-wait bound. Regression test:
+  `TestCoordinator_JoinGroup_UsesInitialRebalanceDelayNotSessionTimeout`,
+  which fails fast (asserts completion within 200ms against a 10s session
+  timeout) rather than actually waiting out a slow bug.
+- **Caught by:** the first attempt at real end-to-end verification - a
+  real `KafkaConsumer.subscribe()` + `poll()` loop, not a hand-crafted
+  `JoinGroup` request. A hand-rolled test would have had no reason to send
+  a large session timeout and use a short poll budget, the exact
+  combination that exposed the bug.
+- **Lesson:** two timeouts that are both "how long to wait" are not
+  interchangeable just because they're both durations in the same request.
+  Real Kafka keeping them as genuinely separate broker-side vs. client-side
+  settings was a design decision worth understanding before reusing one
+  field for two purposes.
