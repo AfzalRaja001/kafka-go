@@ -171,6 +171,60 @@ client requests at all. `Coordinator` now takes that delay as a constructor para
 in `main.go`, short values in tests so the suite doesn't spend real wall-clock seconds waiting on windows that
 exist to test timing behavior, not to be fast.
 
+## 2026-08-24 - `__consumer_offsets` persistence lives in a new `internal/offsets` package, not `internal/group`
+
+`InMemoryOffsetStore` (the previous entry) was always step one of a deliberate two-step build: get the
+rebalance flow working first, then persist commits for real once that flow existed to exercise them. Track
+A's rebalance machinery is merged now, so this is that second step: `LogBackedStore`, an `OffsetStore` that
+appends every commit to a real `storage.Log`-managed internal topic, `__consumer_offsets`, instead of a plain
+map - committed offsets now survive a broker restart, not just the lifetime of the Go process holding them.
+
+It doesn't live in `internal/group` alongside the interface it implements, because `internal/group`
+deliberately imports nothing else in this project (see the OffsetStore entry above and the Coordinator
+entries below) - importing `storage.Log` would break that. Rather than relax the rule, `LogBackedStore` lives
+in a new `internal/offsets` package that's allowed to depend on both `group` (for the interface) and
+`storage` (for `Log`), the same way `broker` already depends on both without either of them depending on each
+other.
+
+Three simplifications, all deliberate, all because nothing outside this broker ever reads
+`__consumer_offsets` directly:
+
+- **Not a real Kafka record batch on disk.** Every other topic's data is stored as the client's own record
+  batch bytes, verbatim, because a real client later `Fetch`es those exact bytes back. Nothing ever `Fetch`es
+  this topic, so there's no reason to pay for a CRC and a full v2 batch header nobody parses. Instead each
+  commit is one small length-prefixed record (`internal/offsets/record.go`) - the length prefix matters
+  because `Log.Read` concatenates raw batch bytes with no boundaries of its own, so replaying a stretch of the
+  log back into individual commits needs each record to say its own length.
+- **One partition, not real Kafka's default of 50.** 50 partitions exists purely so multiple brokers can share
+  the load of this topic - meaningless on a single-node broker, so it would only add a hashing scheme and N
+  logs to replay at startup for no benefit anything here would exercise.
+- **Provisioned directly by the broker at startup, not through `TopicRegistry`.** `NewLogBackedStore` calls
+  `Log.CreatePartition` itself before replaying, and never touches the registry - so `__consumer_offsets`
+  never appears in a `Metadata` response, can't be listed, and can't be `DeleteTopics`'d by a client. Matches
+  what the topic actually is here: an internal implementation detail, not something clients are meant to know
+  about.
+
+**Read path**: a plain `map[key]latestValue` in memory, rebuilt once at construction by replaying the whole
+topic from offset 0 (folding each record in so the last write for a key wins), then kept warm by every
+`Commit` afterward - `Fetch` is always just a map read, never disk I/O. This mirrors the same
+replay-to-rebuild-state pattern `DiskLog.OpenPartition` already uses to recover `nextOffset` on restart, so
+it's a familiar shape applied to a new kind of state, not a new concept.
+
+**No real (space-reclaiming) compaction yet.** The plan lists log compaction as its own Phase 5 deliverable,
+separate from this piece. What this step needs is only correctness - replay-and-fold always resolves to the
+latest value per key, which is what "compacted" means for a *reader*. The underlying log grows unbounded for
+now; when Phase 5 builds real segment compaction for the general `Log` interface, `__consumer_offsets` gets
+it for free rather than needing a second bespoke implementation.
+
+A malformed record during replay makes `NewLogBackedStore` return an error rather than skip it silently -
+this topic's only job is to make restart recovery correct, so failing loudly on data it can't make sense of
+is safer than starting up with a wrong picture of what every group has committed.
+
+Verified against a real broker process, not just unit tests: committed an offset via a hand-crafted
+`OffsetCommit` v0 request, killed the broker process, started a fresh one against the same `data/` directory,
+and fetched the same offset back over a brand-new connection with no error - the actual property this piece
+exists for.
+
 ## 2026-08-22 - Protocol selection picks the first name common to every member, not full voting
 
 Real Kafka's actual algorithm for choosing which assignment protocol (e.g. `range`, `roundrobin`) a group

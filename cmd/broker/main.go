@@ -9,6 +9,7 @@ import (
 
 	"github.com/AfzalRaja001/kafka-go/internal/broker"
 	"github.com/AfzalRaja001/kafka-go/internal/group"
+	"github.com/AfzalRaja001/kafka-go/internal/offsets"
 	"github.com/AfzalRaja001/kafka-go/internal/protocol"
 	"github.com/AfzalRaja001/kafka-go/internal/storage"
 )
@@ -52,7 +53,10 @@ func main() {
 		{NodeID: 1, Host: "localhost", Port: 9092},
 	}
 
-	offsets := group.NewInMemoryOffsetStore()
+	offsetStore, err := offsets.NewLogBackedStore(diskLog)
+	if err != nil {
+		log.Fatalf("offset store: %v", err)
+	}
 	coord := group.NewCoordinator(initialRebalanceDelay)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -61,7 +65,7 @@ func main() {
 	go runReaper(ctx, coord)
 
 	log.Printf("kafka-go broker listening on %s", listenAddr)
-	if err := broker.Serve(ctx, listenAddr, registry, brokers, diskLog, offsets, coord); err != nil {
+	if err := broker.Serve(ctx, listenAddr, registry, brokers, diskLog, offsetStore, coord); err != nil {
 		log.Fatalf("broker: %v", err)
 	}
 	log.Println("kafka-go broker stopped")
