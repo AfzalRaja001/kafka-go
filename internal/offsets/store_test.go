@@ -151,6 +151,53 @@ func TestLogBackedStore_SurvivesRestart(t *testing.T) {
 	}
 }
 
+func TestLogBackedStore_FetchAllReturnsEveryCommitForThatGroupOnly(t *testing.T) {
+	store, err := NewLogBackedStore(storage.NewFakeLog())
+	if err != nil {
+		t.Fatalf("NewLogBackedStore: %v", err)
+	}
+
+	store.Commit("group-a", "orders", 0, 5, "checkpoint-a0")
+	store.Commit("group-a", "orders", 1, 7, "checkpoint-a1")
+	store.Commit("group-b", "orders", 0, 99, "not-group-a")
+
+	got := store.FetchAll("group-a")
+	if len(got) != 2 {
+		t.Fatalf("FetchAll(group-a) returned %d entries, want 2: %+v", len(got), got)
+	}
+}
+
+// TestLogBackedStore_FetchAllSurvivesRestart proves FetchAll is answered
+// from the replayed index, not just from commits made on the same
+// instance - the same restart property TestLogBackedStore_SurvivesRestart
+// establishes for Fetch.
+func TestLogBackedStore_FetchAllSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+
+	log := storage.NewDiskLog(dir, 1<<20, 5)
+	store, err := NewLogBackedStore(log)
+	if err != nil {
+		t.Fatalf("NewLogBackedStore: %v", err)
+	}
+	store.Commit("group-a", "orders", 0, 5, "")
+	store.Commit("group-a", "orders", 1, 7, "")
+	if err := log.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	reopened := storage.NewDiskLog(dir, 1<<20, 5)
+	defer reopened.Close()
+	restarted, err := NewLogBackedStore(reopened)
+	if err != nil {
+		t.Fatalf("NewLogBackedStore after restart: %v", err)
+	}
+
+	got := restarted.FetchAll("group-a")
+	if len(got) != 2 {
+		t.Fatalf("FetchAll(group-a) after restart returned %d entries, want 2: %+v", len(got), got)
+	}
+}
+
 func TestNewLogBackedStore_CorruptDataReturnsError(t *testing.T) {
 	log := storage.NewFakeLog()
 	if err := log.CreatePartition(topicName, partitionID); err != nil {

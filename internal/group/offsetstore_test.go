@@ -72,3 +72,44 @@ func TestInMemoryOffsetStore_KeysAreIndependent(t *testing.T) {
 		}
 	}
 }
+
+func TestInMemoryOffsetStore_FetchAllReturnsEveryCommitForThatGroupOnly(t *testing.T) {
+	store := NewInMemoryOffsetStore()
+
+	store.Commit("group-a", "orders", 0, 5, "checkpoint-a0")
+	store.Commit("group-a", "orders", 1, 7, "checkpoint-a1")
+	store.Commit("group-a", "payments", 0, 3, "checkpoint-p0")
+	store.Commit("group-b", "orders", 0, 99, "not-group-a")
+
+	got := store.FetchAll("group-a")
+	if len(got) != 3 {
+		t.Fatalf("FetchAll(group-a) returned %d entries, want 3: %+v", len(got), got)
+	}
+
+	byKey := make(map[[2]any]GroupOffset)
+	for _, g := range got {
+		byKey[[2]any{g.Topic, g.Partition}] = g
+	}
+
+	want := []GroupOffset{
+		{Topic: "orders", Partition: 0, Offset: 5, Metadata: "checkpoint-a0"},
+		{Topic: "orders", Partition: 1, Offset: 7, Metadata: "checkpoint-a1"},
+		{Topic: "payments", Partition: 0, Offset: 3, Metadata: "checkpoint-p0"},
+	}
+	for _, w := range want {
+		g, ok := byKey[[2]any{w.Topic, w.Partition}]
+		if !ok || g != w {
+			t.Errorf("FetchAll(group-a) missing or wrong entry for (%s, %d): got %+v, want %+v", w.Topic, w.Partition, g, w)
+		}
+	}
+}
+
+func TestInMemoryOffsetStore_FetchAllForUnknownGroupReturnsEmpty(t *testing.T) {
+	store := NewInMemoryOffsetStore()
+	store.Commit("group-a", "orders", 0, 5, "")
+
+	got := store.FetchAll("never-heard-of-it")
+	if len(got) != 0 {
+		t.Errorf("FetchAll(never-heard-of-it) = %+v, want empty", got)
+	}
+}

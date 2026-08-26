@@ -139,3 +139,17 @@ func (s *LogBackedStore) Fetch(group, topic string, partition int32) (int64, str
 	}
 	return c.offset, c.metadata, true
 }
+
+func (s *LogBackedStore) FetchAll(groupID string) []group.GroupOffset {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var out []group.GroupOffset
+	for key, c := range s.latest {
+		if key.group != groupID {
+			continue
+		}
+		out = append(out, group.GroupOffset{Topic: key.topic, Partition: key.partition, Offset: c.offset, Metadata: c.metadata})
+	}
+	return out
+}
