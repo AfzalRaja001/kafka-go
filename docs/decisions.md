@@ -237,3 +237,29 @@ follower-wait is bounded by the member's own session timeout rather than waiting
 gap real Kafka closes with more machinery: if the leader crashes between `JoinGroup` and `SyncGroup`, a
 follower here times out (`ErrSyncTimedOut`, mapped to `REBALANCE_IN_PROGRESS`) rather than hanging - not
 handled today is *automatically retriggering* a fresh rebalance in that case, left for whoever hits it.
+
+## 2026-08-26 - `OffsetFetch` bumped from v0 to v2, adding `OffsetStore.FetchAll`
+
+The OffsetStore design entry above named a real, not hypothetical, gap: `kafka-python`'s
+`KafkaAdminClient.list_group_offsets()` - the actual method an admin tool reaches for to answer "what has this
+group committed" - sends a null topics array, which requires `OffsetFetch` v2. v0 only lets a client ask about
+topic-partitions it already knows to name, which defeats the point of an admin/inspection call. Verified
+against Apache Kafka's own `OffsetFetchRequest.json`/`OffsetFetchResponse.json` schemas (branch 2.5) rather
+than assumed from memory: v2's only wire differences from v0 are that the top-level `topics` array can be `-1`
+(null) instead of always present, and the response gains a top-level `error_code` after the topics array.
+Jumped straight from v0 to v2, skipping v1 entirely, matching the schema's own comment that "version 1 is the
+same as version 0" - there's nothing v1 offers this broker needs.
+
+Answering "everything this group has committed" needed a capability neither `Commit` nor `Fetch` has - both
+are single-key operations. Added `FetchAll(group string) []GroupOffset` to `OffsetStore`, returning a flat,
+unordered slice rather than anything shaped like Kafka's nested per-topic response: `OffsetStore` deliberately
+knows nothing about wire format for any of its other methods either, so `HandleOffsetFetch` groups the flat
+result by topic and sorts it (for a deterministic response) itself, the same way it already builds per-topic
+structure from an explicit request. Both `InMemoryOffsetStore` and `internal/offsets.LogBackedStore`
+implement it as a straightforward "filter my existing map by group" loop - no new storage, no new state, just
+a new way to query what was already being kept.
+
+Verified against a real broker process with the actual client method this exists for: committed offsets for
+three topic-partitions via a hand-crafted `OffsetCommit` request, then called `KafkaAdminClient(api_version=
+(2, 5, 0)).list_group_offsets(group)` from `kafka-python` and got all three back correctly - the exact call
+that failed with `UnsupportedVersionError` before this change.

@@ -19,6 +19,23 @@ type OffsetStore interface {
 	// been committed for this key - that's the normal case for a consumer
 	// group that hasn't gotten this far yet, not a failure.
 	Fetch(group, topic string, partition int32) (offset int64, metadata string, found bool)
+
+	// FetchAll returns every topic-partition this group has ever committed
+	// an offset for, in no particular order. This answers OffsetFetch v2's
+	// null-topics-array request ("fetch offsets for all topics") - the
+	// thing kafka-python's KafkaAdminClient.list_group_offsets() actually
+	// sends, per the OffsetStore design entry in docs/decisions.md.
+	FetchAll(group string) []GroupOffset
+}
+
+// GroupOffset is one entry in a FetchAll result - the same fields Fetch
+// returns for a single key, plus the topic and partition that key was for,
+// since FetchAll doesn't get to assume the caller already knows them.
+type GroupOffset struct {
+	Topic     string
+	Partition int32
+	Offset    int64
+	Metadata  string
 }
 
 type offsetKey struct {
@@ -58,4 +75,18 @@ func (s *InMemoryOffsetStore) Fetch(group, topic string, partition int32) (int64
 		return 0, "", false
 	}
 	return c.offset, c.metadata, true
+}
+
+func (s *InMemoryOffsetStore) FetchAll(group string) []GroupOffset {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var out []GroupOffset
+	for key, c := range s.offsets {
+		if key.group != group {
+			continue
+		}
+		out = append(out, GroupOffset{Topic: key.topic, Partition: key.partition, Offset: c.offset, Metadata: c.metadata})
+	}
+	return out
 }
