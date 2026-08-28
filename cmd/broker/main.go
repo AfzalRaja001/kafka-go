@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"time"
 
 	"github.com/AfzalRaja001/kafka-go/internal/broker"
 	"github.com/AfzalRaja001/kafka-go/internal/group"
+	"github.com/AfzalRaja001/kafka-go/internal/metrics"
 	"github.com/AfzalRaja001/kafka-go/internal/offsets"
 	"github.com/AfzalRaja001/kafka-go/internal/protocol"
 	"github.com/AfzalRaja001/kafka-go/internal/storage"
@@ -16,7 +18,14 @@ import (
 
 const (
 	listenAddr = ":9092"
-	dataDir    = "data"
+
+	// metricsAddr is a separate HTTP listener - Prometheus scrapes with a
+	// plain GET, which has nothing to do with the raw TCP Kafka wire
+	// protocol on listenAddr, so this needs its own port rather than
+	// trying to multiplex both protocols onto one.
+	metricsAddr = ":9101"
+
+	dataDir = "data"
 
 	// segmentMaxBytes and indexEvery are deliberately small for now, while
 	// this is being tested at hand-run scale - real Kafka defaults to
@@ -58,17 +67,41 @@ func main() {
 		log.Fatalf("offset store: %v", err)
 	}
 	coord := group.NewCoordinator(initialRebalanceDelay)
+	recorder := metrics.NewRecorder()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
 	go runReaper(ctx, coord)
+	go runMetricsServer(ctx, recorder)
 
 	log.Printf("kafka-go broker listening on %s", listenAddr)
-	if err := broker.Serve(ctx, listenAddr, registry, brokers, diskLog, offsetStore, coord); err != nil {
+	if err := broker.Serve(ctx, listenAddr, registry, brokers, diskLog, offsetStore, coord, recorder); err != nil {
 		log.Fatalf("broker: %v", err)
 	}
 	log.Println("kafka-go broker stopped")
+}
+
+// runMetricsServer serves Prometheus metrics over plain HTTP until ctx is
+// canceled. No graceful shutdown machinery here - matches this project's
+// current level of polish everywhere else (the main TCP listener's own
+// shutdown is a plain listener.Close(), not a drain), and a scrape target
+// going away mid-request just looks like a failed scrape to Prometheus, not
+// data loss.
+func runMetricsServer(ctx context.Context, recorder *metrics.Recorder) {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", recorder.Handler())
+	server := &http.Server{Addr: metricsAddr, Handler: mux}
+
+	go func() {
+		<-ctx.Done()
+		server.Close()
+	}()
+
+	log.Printf("kafka-go metrics listening on %s/metrics", metricsAddr)
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Printf("metrics server: %v", err)
+	}
 }
 
 // runReaper periodically evicts consumer group members that have gone

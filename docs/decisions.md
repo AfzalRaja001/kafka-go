@@ -263,3 +263,51 @@ Verified against a real broker process with the actual client method this exists
 three topic-partitions via a hand-crafted `OffsetCommit` request, then called `KafkaAdminClient(api_version=
 (2, 5, 0)).list_group_offsets(group)` from `kafka-python` and got all three back correctly - the exact call
 that failed with `UnsupportedVersionError` before this change.
+
+## 2026-08-27 - Prometheus metrics: request-path only for now, explicit DI, no global registry
+
+Phase 5 Track A's metrics list has two different flavors: request-path metrics (bytes in/out, request counts,
+latency per API - all available by wrapping the one function every request already funnels through) and
+storage-introspection metrics (partition sizes, consumer group lag - need new capabilities on `storage.Log`
+and `OffsetStore`, computed periodically rather than per-request). This piece covers only the first kind;
+partition sizes and lag are a clearly-scoped follow-up, matching the "extend a frozen interface deliberately,
+one reason at a time" pattern this project already used twice for `Log`.
+
+`prometheus/client_golang` is this project's first external dependency (`go.mod` had zero `require`s before
+this). The new `internal/metrics` package builds its own `prometheus.Registry` per `Recorder` rather than
+using the client library's global `DefaultRegisterer` via `promauto` - the more common idiom in the wider
+Prometheus-Go ecosystem, but it would be this project's first piece of global mutable state, when every other
+stateful component (`storage.Log`, `group.Coordinator`, `group.OffsetStore`) is constructed once in `main.go`
+and threaded through explicitly. A `Recorder` is constructed the same way and passed into `broker.Serve` ->
+`handleConn` -> `dispatch`, so this stays consistent, and multiple `Recorder`s can coexist in one test binary
+without a "duplicate metrics collector registration attempted" panic.
+
+`RecordRequest` takes an already-resolved label string, not a raw `api_key` - `internal/metrics` has no
+notion of the Kafka protocol's api_key scheme, matching `internal/group`'s own zero-dependency stance applied
+to a new package. The int16 -> name resolution (`protocol.ApiKeyName`) lives in `internal/protocol` next to
+the `ApiKeyProduce` etc. constants it names; `dispatch` resolves it once before calling in. Unknown api_key
+values map to a fixed `"Unknown"` string rather than the raw number - `api_key` is client-controlled input,
+and echoing an arbitrary number into a metric label would let garbage input create unlimited distinct label
+combinations, a real Prometheus failure mode called cardinality explosion.
+
+`dispatch` gained one parameter and zero changes to any of its 14 `switch` cases: it now has named return
+values (`resp, err`) so a single `defer` after the shared request header is decoded can observe whichever
+case actually ran and record its outcome once. Header-decode failures (too short to contain a valid
+`api_key`) aren't recorded at all - `handleConn` already closes the connection immediately in that case, so
+there's no confidently-known `api_key` to label and no ongoing signal worth reporting.
+
+"Messages/sec" in the plan's wording really means records/sec, not requests/sec - one `Produce` request can
+carry a batch of many records. Getting the literal count would mean changing `HandleProduce`'s signature to
+report it, which is Produce-specific work that breaks the "every API key gets identical generic treatment"
+property the rest of this piece relies on. For now, `kafkago_requests_total{api_key="Produce"}` through
+`rate()` is a real, useful throughput signal - just "Produce requests/sec" - and true per-record counting is
+deferred to the same follow-up as partition sizes and consumer lag.
+
+The metrics HTTP server (`:9101/metrics`, separate from the Kafka wire protocol's `:9092`) has no graceful
+shutdown machinery, matching this project's current level of polish everywhere else - a scrape mid-shutdown
+just looks like a failed scrape to Prometheus, not data loss.
+
+Verified against a real broker process, not just unit tests: scraped `/metrics` before any traffic (empty,
+200 OK - Prometheus vectors don't export a series until first observed), sent real `CreateTopics`/`Metadata`/
+`Produce` traffic via `kafka-python`, then scraped again and saw real counts, byte totals, and latency
+histograms for exactly the APIs actually called.

@@ -2,8 +2,10 @@ package broker
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/AfzalRaja001/kafka-go/internal/group"
+	"github.com/AfzalRaja001/kafka-go/internal/metrics"
 	"github.com/AfzalRaja001/kafka-go/internal/protocol"
 	"github.com/AfzalRaja001/kafka-go/internal/storage"
 )
@@ -11,7 +13,10 @@ import (
 // dispatch decodes the request header every Kafka request shares
 // (api_key, api_version, correlation_id, client_id), then routes to
 // whichever handler owns that api_key, passing it whatever bytes remain.
-func dispatch(msg []byte, registry *protocol.TopicRegistry, brokers []protocol.Broker, log storage.Log, offsets group.OffsetStore, coord *group.Coordinator) ([]byte, error) {
+// Named returns (resp, err) exist so the deferred recorder.RecordRequest
+// call below can observe whichever switch case actually ran, without every
+// one of the 14 cases needing to record anything itself.
+func dispatch(msg []byte, registry *protocol.TopicRegistry, brokers []protocol.Broker, log storage.Log, offsets group.OffsetStore, coord *group.Coordinator, recorder *metrics.Recorder) (resp []byte, err error) {
 	dec := protocol.NewDecoder(msg)
 
 	apiKey, err := dec.Int16()
@@ -29,6 +34,15 @@ func dispatch(msg []byte, registry *protocol.TopicRegistry, brokers []protocol.B
 	if _, err := dec.NullableString(); err != nil { // client_id: decoded, not used yet
 		return nil, fmt.Errorf("decode client_id: %w", err)
 	}
+
+	// Only requests with a successfully decoded api_key get recorded - a
+	// header too short to even contain one leaves handleConn closing the
+	// connection immediately anyway, so there's no api_key to label a
+	// metric with and no ongoing signal worth reporting.
+	start := time.Now()
+	defer func() {
+		recorder.RecordRequest(protocol.ApiKeyName(apiKey), time.Since(start), len(msg), len(resp), err)
+	}()
 
 	switch apiKey {
 	case protocol.ApiKeyApiVersions:
