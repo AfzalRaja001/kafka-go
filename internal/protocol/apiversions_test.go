@@ -51,3 +51,43 @@ func TestHandleApiVersions_UnsupportedVersionFallsBackToV0(t *testing.T) {
 		t.Fatalf("api count = %d, %v, want %d", count, err, len(SupportedAPIs))
 	}
 }
+
+func TestApiKeyName_KnownKeysGetReadableNames(t *testing.T) {
+	tests := []struct {
+		apiKey int16
+		want   string
+	}{
+		{ApiKeyProduce, "Produce"},
+		{ApiKeyFetch, "Fetch"},
+		{ApiKeyListOffsets, "ListOffsets"},
+		{ApiKeyMetadata, "Metadata"},
+		{ApiKeyOffsetCommit, "OffsetCommit"},
+		{ApiKeyOffsetFetch, "OffsetFetch"},
+		{ApiKeyFindCoordinator, "FindCoordinator"},
+		{ApiKeyJoinGroup, "JoinGroup"},
+		{ApiKeyHeartbeat, "Heartbeat"},
+		{ApiKeyLeaveGroup, "LeaveGroup"},
+		{ApiKeySyncGroup, "SyncGroup"},
+		{ApiKeyApiVersions, "ApiVersions"},
+		{ApiKeyCreateTopics, "CreateTopics"},
+		{ApiKeyDeleteTopics, "DeleteTopics"},
+	}
+	for _, tt := range tests {
+		if got := ApiKeyName(tt.apiKey); got != tt.want {
+			t.Errorf("ApiKeyName(%d) = %q, want %q", tt.apiKey, got, tt.want)
+		}
+	}
+}
+
+// TestApiKeyName_UnknownKeyDoesNotEchoRawInput pins down why unknown api_key
+// values get a fixed fallback string rather than being formatted into the
+// name directly: api_key is attacker/client-controlled, and using it
+// unbounded as a Prometheus label value would let garbage input create
+// unlimited distinct label combinations (a cardinality explosion). The
+// fallback must not contain the raw number.
+func TestApiKeyName_UnknownKeyDoesNotEchoRawInput(t *testing.T) {
+	got := ApiKeyName(9999)
+	if got != "Unknown" {
+		t.Errorf("ApiKeyName(9999) = %q, want %q", got, "Unknown")
+	}
+}

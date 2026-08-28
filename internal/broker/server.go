@@ -9,13 +9,14 @@ import (
 	"net"
 
 	"github.com/AfzalRaja001/kafka-go/internal/group"
+	"github.com/AfzalRaja001/kafka-go/internal/metrics"
 	"github.com/AfzalRaja001/kafka-go/internal/protocol"
 	"github.com/AfzalRaja001/kafka-go/internal/storage"
 )
 
 // Serve listens on address and accepts connections until ctx is canceled,
 // at which point it closes the listener and returns cleanly.
-func Serve(ctx context.Context, address string, registry *protocol.TopicRegistry, brokers []protocol.Broker, diskLog storage.Log, offsets group.OffsetStore, coord *group.Coordinator) error {
+func Serve(ctx context.Context, address string, registry *protocol.TopicRegistry, brokers []protocol.Broker, diskLog storage.Log, offsets group.OffsetStore, coord *group.Coordinator, recorder *metrics.Recorder) error {
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return err
@@ -36,11 +37,11 @@ func Serve(ctx context.Context, address string, registry *protocol.TopicRegistry
 				return err
 			}
 		}
-		go handleConn(conn, registry, brokers, diskLog, offsets, coord)
+		go handleConn(conn, registry, brokers, diskLog, offsets, coord, recorder)
 	}
 }
 
-func handleConn(conn net.Conn, registry *protocol.TopicRegistry, brokers []protocol.Broker, diskLog storage.Log, offsets group.OffsetStore, coord *group.Coordinator) {
+func handleConn(conn net.Conn, registry *protocol.TopicRegistry, brokers []protocol.Broker, diskLog storage.Log, offsets group.OffsetStore, coord *group.Coordinator, recorder *metrics.Recorder) {
 	defer conn.Close()
 
 	reader := bufio.NewReaderSize(conn, 64*1024)
@@ -56,7 +57,7 @@ func handleConn(conn net.Conn, registry *protocol.TopicRegistry, brokers []proto
 			return
 		}
 
-		resp, err := dispatch(msg, registry, brokers, diskLog, offsets, coord)
+		resp, err := dispatch(msg, registry, brokers, diskLog, offsets, coord, recorder)
 		if err != nil {
 			log.Printf("broker: dispatch error: %v", err)
 			return

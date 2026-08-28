@@ -18,6 +18,39 @@ const (
 	ApiKeyDeleteTopics    int16 = 20
 )
 
+// apiKeyNames maps every api_key this broker implements to a readable name,
+// used to label Prometheus metrics per API. Unknown values fall back to a
+// fixed string rather than formatting the raw number in - api_key is
+// client-controlled input, and echoing an arbitrary number into a metric
+// label would let garbage input create unlimited distinct label
+// combinations (a cardinality explosion), which real Prometheus deployments
+// have been taken down by.
+var apiKeyNames = map[int16]string{
+	ApiKeyProduce:         "Produce",
+	ApiKeyFetch:           "Fetch",
+	ApiKeyListOffsets:     "ListOffsets",
+	ApiKeyMetadata:        "Metadata",
+	ApiKeyOffsetCommit:    "OffsetCommit",
+	ApiKeyOffsetFetch:     "OffsetFetch",
+	ApiKeyFindCoordinator: "FindCoordinator",
+	ApiKeyJoinGroup:       "JoinGroup",
+	ApiKeyHeartbeat:       "Heartbeat",
+	ApiKeyLeaveGroup:      "LeaveGroup",
+	ApiKeySyncGroup:       "SyncGroup",
+	ApiKeyApiVersions:     "ApiVersions",
+	ApiKeyCreateTopics:    "CreateTopics",
+	ApiKeyDeleteTopics:    "DeleteTopics",
+}
+
+// ApiKeyName returns a readable name for apiKey, or "Unknown" for anything
+// this broker doesn't implement.
+func ApiKeyName(apiKey int16) string {
+	if name, ok := apiKeyNames[apiKey]; ok {
+		return name
+	}
+	return "Unknown"
+}
+
 type SupportedAPI struct {
 	APIKey     int16
 	MinVersion int16
