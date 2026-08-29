@@ -14,6 +14,12 @@ type Log interface {
 	EarliestOffset(topic string, partition int32) (int64, error)
 	LatestOffset(topic string, partition int32) (int64, error)
 
+	// Size reports the total on-disk log bytes for a topic-partition - not
+	// index/timeindex files, matching real Kafka's own meaning of partition
+	// size. Used for the kafkago_partition_bytes metric, not by any request
+	// handler.
+	Size(topic string, partition int32) (int64, error)
+
 	// CreatePartition provisions a topic-partition's storage eagerly, so it
 	// is immediately readable at offset 0 even before anything is Appended.
 	// DeletePartition removes it, including its on-disk data. Both exist

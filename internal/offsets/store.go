@@ -153,3 +153,19 @@ func (s *LogBackedStore) FetchAll(groupID string) []group.GroupOffset {
 	}
 	return out
 }
+
+func (s *LogBackedStore) Groups() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	seen := make(map[string]bool)
+	for key := range s.latest {
+		seen[key.group] = true
+	}
+
+	out := make([]string, 0, len(seen))
+	for groupID := range seen {
+		out = append(out, groupID)
+	}
+	return out
+}

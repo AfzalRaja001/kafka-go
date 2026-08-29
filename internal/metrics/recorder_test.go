@@ -39,6 +39,17 @@ func counterValue(t *testing.T, family *dto.MetricFamily, labels map[string]stri
 	return 0
 }
 
+func gaugeValue(t *testing.T, family *dto.MetricFamily, labels map[string]string) float64 {
+	t.Helper()
+	for _, m := range family.GetMetric() {
+		if labelsMatch(m.GetLabel(), labels) {
+			return m.GetGauge().GetValue()
+		}
+	}
+	t.Fatalf("no metric in family %s matching labels %v", family.GetName(), labels)
+	return 0
+}
+
 func labelsMatch(pairs []*dto.LabelPair, want map[string]string) bool {
 	if len(pairs) != len(want) {
 		return false
@@ -146,6 +157,59 @@ func TestRecordRequest_ObservesDurationInHistogram(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("no histogram sample found for api_key=Produce")
+	}
+}
+
+func TestSetPartitionBytes_SetsAGaugeLabeledByTopicAndPartition(t *testing.T) {
+	r := NewRecorder()
+
+	r.SetPartitionBytes("orders", 0, 1234)
+	r.SetPartitionBytes("orders", 1, 5678)
+
+	families := gather(t, r)
+	partitionBytes, ok := families["kafkago_partition_bytes"]
+	if !ok {
+		t.Fatal("kafkago_partition_bytes not found")
+	}
+
+	if got := gaugeValue(t, partitionBytes, map[string]string{"topic": "orders", "partition": "0"}); got != 1234 {
+		t.Errorf("orders-0 = %v, want 1234", got)
+	}
+	if got := gaugeValue(t, partitionBytes, map[string]string{"topic": "orders", "partition": "1"}); got != 5678 {
+		t.Errorf("orders-1 = %v, want 5678", got)
+	}
+}
+
+// TestSetPartitionBytes_IsAGaugeNotACounter proves a later, smaller value
+// overwrites the earlier one rather than accumulating - partition size can
+// legitimately shrink (retention, compaction), unlike a request counter,
+// which is why this is a Gauge and not a Counter.
+func TestSetPartitionBytes_IsAGaugeNotACounter(t *testing.T) {
+	r := NewRecorder()
+
+	r.SetPartitionBytes("orders", 0, 1000)
+	r.SetPartitionBytes("orders", 0, 400)
+
+	families := gather(t, r)
+	got := gaugeValue(t, families["kafkago_partition_bytes"], map[string]string{"topic": "orders", "partition": "0"})
+	if got != 400 {
+		t.Errorf("got %v, want 400 (the latest value, not 1000+400)", got)
+	}
+}
+
+func TestSetConsumerGroupLag_SetsAGaugeLabeledByGroupTopicAndPartition(t *testing.T) {
+	r := NewRecorder()
+
+	r.SetConsumerGroupLag("my-group", "orders", 0, 42)
+
+	families := gather(t, r)
+	lag, ok := families["kafkago_consumer_group_lag"]
+	if !ok {
+		t.Fatal("kafkago_consumer_group_lag not found")
+	}
+	got := gaugeValue(t, lag, map[string]string{"group": "my-group", "topic": "orders", "partition": "0"})
+	if got != 42 {
+		t.Errorf("got %v, want 42", got)
 	}
 }
 

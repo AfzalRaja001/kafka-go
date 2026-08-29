@@ -47,6 +47,12 @@ const (
 	// showed up. Deliberately not derived from any client's session
 	// timeout - see the comment on group.NewCoordinator.
 	initialRebalanceDelay = 3 * time.Second
+
+	// metricsCollectInterval is slower than reapInterval on purpose: this
+	// is observability, not correctness-critical the way reaping stale
+	// group members is, and each tick does real work (walks every known
+	// topic-partition and every known consumer group).
+	metricsCollectInterval = 15 * time.Second
 )
 
 func main() {
@@ -74,6 +80,7 @@ func main() {
 
 	go runReaper(ctx, coord)
 	go runMetricsServer(ctx, recorder)
+	go runMetricsCollector(ctx, metricsCollectInterval, registry, diskLog, offsetStore, recorder)
 
 	log.Printf("kafka-go broker listening on %s", listenAddr)
 	if err := broker.Serve(ctx, listenAddr, registry, brokers, diskLog, offsetStore, coord, recorder); err != nil {

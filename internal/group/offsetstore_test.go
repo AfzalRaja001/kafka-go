@@ -113,3 +113,32 @@ func TestInMemoryOffsetStore_FetchAllForUnknownGroupReturnsEmpty(t *testing.T) {
 		t.Errorf("FetchAll(never-heard-of-it) = %+v, want empty", got)
 	}
 }
+
+func TestInMemoryOffsetStore_GroupsReturnsEveryDistinctGroupThatHasEverCommitted(t *testing.T) {
+	store := NewInMemoryOffsetStore()
+	store.Commit("group-a", "orders", 0, 5, "")
+	store.Commit("group-a", "orders", 1, 7, "") // same group, second key - must not appear twice
+	store.Commit("group-b", "orders", 0, 99, "")
+
+	got := store.Groups()
+	if len(got) != 2 {
+		t.Fatalf("Groups() = %v, want 2 distinct groups", got)
+	}
+
+	seen := map[string]bool{}
+	for _, g := range got {
+		seen[g] = true
+	}
+	if !seen["group-a"] || !seen["group-b"] {
+		t.Errorf("Groups() = %v, want group-a and group-b", got)
+	}
+}
+
+func TestInMemoryOffsetStore_GroupsOnEmptyStoreReturnsEmpty(t *testing.T) {
+	store := NewInMemoryOffsetStore()
+
+	got := store.Groups()
+	if len(got) != 0 {
+		t.Errorf("Groups() on empty store = %v, want empty", got)
+	}
+}

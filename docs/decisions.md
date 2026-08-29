@@ -311,3 +311,52 @@ Verified against a real broker process, not just unit tests: scraped `/metrics` 
 200 OK - Prometheus vectors don't export a series until first observed), sent real `CreateTopics`/`Metadata`/
 `Produce` traffic via `kafka-python`, then scraped again and saw real counts, byte totals, and latency
 histograms for exactly the APIs actually called.
+
+## 2026-08-29 - Partition sizes and consumer group lag: the deferred half of Phase 5 Track A metrics
+
+The previous entry deferred two metrics that need periodic background collection rather than per-request
+instrumentation. This closes that gap.
+
+`storage.Log` gains its third deliberate extension: `Size(topic string, partition int32) (int64, error)`.
+`DiskLog.Size` sums each segment's already-in-memory `size` field (updated on every `Append`), so it costs no
+disk I/O - the same "cheap, always-tracked bookkeeping" style the offset machinery already uses.
+It reports genuine on-disk footprint, including the per-record 8-byte header this segment format writes
+(payload length + offset span) - a TDD-caught correction: the first draft of the disk-backed tests assumed
+payload-only byte counts, and the real numbers came back larger until the tests were fixed to expect
+`payload + recordHeaderSize` per record, matching what `Segment.Append` actually writes. `FakeLog.Size`
+reports payload bytes only, since it has no segment file format to mirror - consistent with `FakeLog` never
+having claimed to be byte-exact with `DiskLog`, only offset-exact.
+
+`group.OffsetStore` gains `Groups() []string` - the enumeration lag reporting needs ("which groups even have
+lag to compute"), sourced from committed-offset history rather than `group.Coordinator`'s live membership map.
+This was a real design choice, not the only option: `Coordinator` already tracks every group ID in memory and
+could have exposed a getter with less code. `OffsetStore` won because it's strictly more correct for what lag
+means operationally - a group whose members have all crashed still has real lag worth alerting on, and
+`Coordinator`'s map is pure in-memory (never persisted), so it would report zero known groups immediately
+after a broker restart even while a persistent `OffsetStore` still has real replayed history to compute lag
+against.
+
+`internal/metrics.Recorder` gains two plain setters, `SetPartitionBytes`/`SetConsumerGroupLag`, backed by
+`GaugeVec`s rather than `CounterVec`s - both values can legitimately decrease (retention/compaction shrink a
+partition; a group catching up reduces its own lag), so each call replaces the previous value. Per the
+decision already made for `RecordRequest`, `internal/metrics` still doesn't know what a "partition" or a
+"consumer group" is - it takes labels and a number. The actual correlation logic lives in a new
+`collectMetrics` function in `cmd/broker`: walks `TopicRegistry.All()` calling `Log.Size()` per partition, and
+`OffsetStore.Groups()` -> `FetchAll` -> `Log.LatestOffset()` minus committed, per group. It's a plain function
+with no ticker, mirroring `group.Coordinator.ReapExpiredMembers`'s own shape exactly - the interesting logic
+is independently unit-testable with fakes, and a thin `runMetricsCollector` just wraps it in a ticker, living
+in `main.go` next to `runReaper` and `runMetricsServer` (no new convention for where background goroutines
+live). A per-partition error (the registry knows about a partition the log doesn't) is skipped, not fatal -
+this runs forever on a ticker, so one bad partition must never take the whole loop down. This also produced
+this project's first test file for `cmd/broker` - `collectMetrics` being a pure function is exactly what made
+that possible; `main()` itself remains untested glue, same as it always has been.
+
+Collection interval is 15s, deliberately slower than the reaper's 1s - this is observability, not
+correctness-critical, and each tick does real work (iterates every known topic-partition and every known
+group).
+
+Verified against a real broker: produced 10 real records via `kafka-python`, committed offset 4 for a test
+group via a hand-crafted `OffsetCommit`, waited for a real collector tick, then scraped `/metrics` and saw
+`kafkago_consumer_group_lag{...} 6` (10 - 4, correct) and a real, non-trivial `kafkago_partition_bytes` value
+reflecting genuine on-disk bytes including real Kafka record batch framing overhead, not just message
+payloads.

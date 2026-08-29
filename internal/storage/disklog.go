@@ -186,6 +186,14 @@ func (d *DiskLog) LatestOffset(topic string, partition int32) (int64, error) {
 	return p.LogEndOffset(), nil
 }
 
+func (d *DiskLog) Size(topic string, partition int32) (int64, error) {
+	p, ok := d.getPartition(topic, partition)
+	if !ok {
+		return 0, fmt.Errorf("unknown topic-partition %s-%d", topic, partition)
+	}
+	return p.Size(), nil
+}
+
 func (d *DiskLog) Close() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()

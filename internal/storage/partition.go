@@ -234,6 +234,20 @@ func (p *Partition) LogEndOffset() int64 {
 	return p.nextOffset.Load()
 }
 
+// Size sums every segment's on-disk byte size, active and rolled alike -
+// each Segment already tracks its own size in memory (updated on every
+// Append), so this costs no disk I/O.
+func (p *Partition) Size() int64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	var total int64
+	for _, sg := range p.segments {
+		total += sg.seg.size
+	}
+	return total
+}
+
 // LookupOffsetByTimestamp returns the offset of the nearest indexed entry
 // at or before targetTimestamp, checking every segment's Timeindex.
 // Segments are ordered by base offset, which - since records are always
