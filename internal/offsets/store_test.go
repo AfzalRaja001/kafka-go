@@ -198,6 +198,58 @@ func TestLogBackedStore_FetchAllSurvivesRestart(t *testing.T) {
 	}
 }
 
+func TestLogBackedStore_GroupsReturnsEveryDistinctGroupThatHasEverCommitted(t *testing.T) {
+	store, err := NewLogBackedStore(storage.NewFakeLog())
+	if err != nil {
+		t.Fatalf("NewLogBackedStore: %v", err)
+	}
+
+	store.Commit("group-a", "orders", 0, 5, "")
+	store.Commit("group-a", "orders", 1, 7, "")
+	store.Commit("group-b", "orders", 0, 99, "")
+
+	got := store.Groups()
+	if len(got) != 2 {
+		t.Fatalf("Groups() = %v, want 2 distinct groups", got)
+	}
+	seen := map[string]bool{}
+	for _, g := range got {
+		seen[g] = true
+	}
+	if !seen["group-a"] || !seen["group-b"] {
+		t.Errorf("Groups() = %v, want group-a and group-b", got)
+	}
+}
+
+// TestLogBackedStore_GroupsSurvivesRestart proves Groups is answered from
+// the replayed index, not just groups that committed through this instance -
+// same restart property already established for Fetch and FetchAll.
+func TestLogBackedStore_GroupsSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+
+	log := storage.NewDiskLog(dir, 1<<20, 5)
+	store, err := NewLogBackedStore(log)
+	if err != nil {
+		t.Fatalf("NewLogBackedStore: %v", err)
+	}
+	store.Commit("group-a", "orders", 0, 5, "")
+	if err := log.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	reopened := storage.NewDiskLog(dir, 1<<20, 5)
+	defer reopened.Close()
+	restarted, err := NewLogBackedStore(reopened)
+	if err != nil {
+		t.Fatalf("NewLogBackedStore after restart: %v", err)
+	}
+
+	got := restarted.Groups()
+	if len(got) != 1 || got[0] != "group-a" {
+		t.Errorf("Groups() after restart = %v, want [group-a]", got)
+	}
+}
+
 func TestNewLogBackedStore_CorruptDataReturnsError(t *testing.T) {
 	log := storage.NewFakeLog()
 	if err := log.CreatePartition(topicName, partitionID); err != nil {

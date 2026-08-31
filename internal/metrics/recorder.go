@@ -8,6 +8,7 @@ package metrics
 
 import (
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -27,6 +28,8 @@ type Recorder struct {
 	requestsTotal   *prometheus.CounterVec
 	requestDuration *prometheus.HistogramVec
 	bytesTotal      *prometheus.CounterVec
+	partitionBytes  *prometheus.GaugeVec
+	consumerLag     *prometheus.GaugeVec
 }
 
 func NewRecorder() *Recorder {
@@ -46,14 +49,26 @@ func NewRecorder() *Recorder {
 		Help: "Total bytes moved across all requests, labeled by direction (in/out).",
 	}, []string{"direction"})
 
+	partitionBytes := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "kafkago_partition_bytes",
+		Help: "On-disk log bytes per topic-partition.",
+	}, []string{"topic", "partition"})
+
+	consumerLag := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "kafkago_consumer_group_lag",
+		Help: "How many offsets behind the partition's latest a group's committed offset is.",
+	}, []string{"group", "topic", "partition"})
+
 	registry := prometheus.NewRegistry()
-	registry.MustRegister(requestsTotal, requestDuration, bytesTotal)
+	registry.MustRegister(requestsTotal, requestDuration, bytesTotal, partitionBytes, consumerLag)
 
 	return &Recorder{
 		registry:        registry,
 		requestsTotal:   requestsTotal,
 		requestDuration: requestDuration,
 		bytesTotal:      bytesTotal,
+		partitionBytes:  partitionBytes,
+		consumerLag:     consumerLag,
 	}
 }
 
@@ -75,6 +90,22 @@ func (r *Recorder) RecordRequest(apiKey string, duration time.Duration, requestB
 	r.requestDuration.WithLabelValues(apiKey).Observe(duration.Seconds())
 	r.bytesTotal.WithLabelValues("in").Add(float64(requestBytes))
 	r.bytesTotal.WithLabelValues("out").Add(float64(responseBytes))
+}
+
+// SetPartitionBytes and SetConsumerGroupLag are Gauges, not Counters -
+// unlike a request count, both values can legitimately go down (a
+// compacted or retained partition shrinks; a group catching up reduces its
+// own lag), so each call replaces the previous value rather than adding to
+// it. Both take plain labels and a number, the same as RecordRequest - this
+// package still has no notion of what a "partition" or a "consumer group"
+// actually is; the periodic walk that computes these numbers lives outside
+// internal/metrics entirely (see collectMetrics in cmd/broker).
+func (r *Recorder) SetPartitionBytes(topic string, partition int32, bytes int64) {
+	r.partitionBytes.WithLabelValues(topic, strconv.Itoa(int(partition))).Set(float64(bytes))
+}
+
+func (r *Recorder) SetConsumerGroupLag(group, topic string, partition int32, lag int64) {
+	r.consumerLag.WithLabelValues(group, topic, strconv.Itoa(int(partition))).Set(float64(lag))
 }
 
 // Handler serves this Recorder's metrics in Prometheus text-exposition

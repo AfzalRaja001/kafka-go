@@ -266,3 +266,85 @@ func TestDiskLog_PersistsAcrossReopen(t *testing.T) {
 		t.Errorf("got %q, want %q", got, "durable")
 	}
 }
+
+// TestDiskLog_SizeReflectsBytesActuallyAppended expects payload bytes plus
+// recordHeaderSize (8) per record, not payload bytes alone - each segment
+// blob carries its own length+offset-span header on disk (see segment.go),
+// and Size reports genuine on-disk footprint, the thing this metric exists
+// to measure, not just logical payload size.
+func TestDiskLog_SizeReflectsBytesActuallyAppended(t *testing.T) {
+	log := NewDiskLog(t.TempDir(), 1<<20, 5)
+	defer log.Close()
+
+	log.Append("orders", 0, []byte("first"), 1)  // 5 bytes + 8-byte header
+	log.Append("orders", 0, []byte("second"), 1) // 6 bytes + 8-byte header
+
+	got, err := log.Size("orders", 0)
+	if err != nil {
+		t.Fatalf("Size: %v", err)
+	}
+	want := int64(5 + recordHeaderSize + 6 + recordHeaderSize)
+	if got != want {
+		t.Errorf("Size = %d, want %d", got, want)
+	}
+}
+
+func TestDiskLog_SizeUnknownTopicPartitionErrors(t *testing.T) {
+	log := NewDiskLog(t.TempDir(), 1<<20, 5)
+	defer log.Close()
+
+	if _, err := log.Size("missing", 0); err == nil {
+		t.Fatal("expected an error for an unknown topic-partition, got nil")
+	}
+}
+
+// TestDiskLog_SizeSurvivesReopen pins down that Size reads real on-disk
+// bytes, not an in-memory counter that would reset on restart - the same
+// property TestDiskLog_PersistsAcrossReopen already establishes for Read.
+func TestDiskLog_SizeSurvivesReopen(t *testing.T) {
+	dir := t.TempDir()
+
+	log1 := NewDiskLog(dir, 1<<20, 5)
+	log1.Append("orders", 0, []byte("durable"), 1) // 7 bytes + 8-byte header
+	if err := log1.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	log2 := NewDiskLog(dir, 1<<20, 5)
+	defer log2.Close()
+
+	got, err := log2.Size("orders", 0)
+	if err != nil {
+		t.Fatalf("Size after reopen: %v", err)
+	}
+	want := int64(7 + recordHeaderSize)
+	if got != want {
+		t.Errorf("Size after reopen = %d, want %d", got, want)
+	}
+}
+
+// TestDiskLog_SizeSumsAcrossRolledSegments makes sure Size isn't just
+// reporting the active segment's size - a partition's real on-disk footprint
+// is every segment it's ever rolled to, not just the one still being
+// written.
+func TestDiskLog_SizeSumsAcrossRolledSegments(t *testing.T) {
+	log := NewDiskLog(t.TempDir(), 10, 1000) // tiny segmentMaxBytes forces rolling
+	defer log.Close()
+
+	var want int64
+	for i := 0; i < 5; i++ {
+		record := fmt.Sprintf("record-%d", i)
+		if _, err := log.Append("orders", 0, []byte(record), 1); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+		want += int64(len(record) + recordHeaderSize)
+	}
+
+	got, err := log.Size("orders", 0)
+	if err != nil {
+		t.Fatalf("Size: %v", err)
+	}
+	if got != want {
+		t.Errorf("Size = %d, want %d (sum of every record's payload+header, across every segment)", got, want)
+	}
+}

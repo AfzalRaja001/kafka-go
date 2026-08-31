@@ -135,3 +135,26 @@ func (f *FakeLog) DeletePartition(topic string, partition int32) error {
 	delete(f.batches, logKey{topic, partition})
 	return nil
 }
+
+// Size sums payload bytes only - unlike DiskLog, which also counts the
+// per-record on-disk header (see recordHeaderSize in segment.go). FakeLog
+// was never meant to be byte-exact with the real segment file format (it
+// has no segments at all), so this is fine for what FakeLog exists for:
+// fast handler tests that care about relative size/existence, not exact
+// on-disk footprint.
+func (f *FakeLog) Size(topic string, partition int32) (int64, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	key := logKey{topic, partition}
+	entries, ok := f.batches[key]
+	if !ok {
+		return 0, fmt.Errorf("unknown topic-partition %s-%d", topic, partition)
+	}
+
+	var total int64
+	for _, b := range entries {
+		total += int64(len(b.data))
+	}
+	return total, nil
+}

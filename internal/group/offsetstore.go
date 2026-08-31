@@ -26,6 +26,16 @@ type OffsetStore interface {
 	// thing kafka-python's KafkaAdminClient.list_group_offsets() actually
 	// sends, per the OffsetStore design entry in docs/decisions.md.
 	FetchAll(group string) []GroupOffset
+
+	// Groups returns every distinct group ID that has ever committed an
+	// offset, in no particular order. This is the enumeration consumer
+	// group lag reporting needs ("which groups do we even have to compute
+	// lag for") - deliberately sourced from committed-offset history, not
+	// live rebalance membership: a group whose members have all crashed
+	// still has real lag to report, and unlike group.Coordinator's
+	// in-memory group map, this stays correct immediately after a broker
+	// restart for a persistent OffsetStore.
+	Groups() []string
 }
 
 // GroupOffset is one entry in a FetchAll result - the same fields Fetch
@@ -87,6 +97,22 @@ func (s *InMemoryOffsetStore) FetchAll(group string) []GroupOffset {
 			continue
 		}
 		out = append(out, GroupOffset{Topic: key.topic, Partition: key.partition, Offset: c.offset, Metadata: c.metadata})
+	}
+	return out
+}
+
+func (s *InMemoryOffsetStore) Groups() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	seen := make(map[string]bool)
+	for key := range s.offsets {
+		seen[key.group] = true
+	}
+
+	out := make([]string, 0, len(seen))
+	for group := range seen {
+		out = append(out, group)
 	}
 	return out
 }

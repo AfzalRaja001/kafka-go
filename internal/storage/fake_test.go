@@ -110,3 +110,25 @@ func TestFakeLog_DeletePartitionUnknownIsNotAnError(t *testing.T) {
 		t.Errorf("DeletePartition on unknown partition = %v, want nil", err)
 	}
 }
+
+func TestFakeLog_SizeSumsAppendedBytes(t *testing.T) {
+	log := NewFakeLog()
+	log.Append("orders", 0, []byte("first"), 1)  // 5 bytes
+	log.Append("orders", 0, []byte("second"), 1) // 6 bytes
+
+	got, err := log.Size("orders", 0)
+	if err != nil {
+		t.Fatalf("Size: %v", err)
+	}
+	if got != 11 {
+		t.Errorf("Size = %d, want 11 (5+6)", got)
+	}
+}
+
+func TestFakeLog_SizeUnknownPartitionErrors(t *testing.T) {
+	log := NewFakeLog()
+
+	if _, err := log.Size("missing", 0); err == nil {
+		t.Fatal("expected an error for an unknown topic-partition, got nil")
+	}
+}
