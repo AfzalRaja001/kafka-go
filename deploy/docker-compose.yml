@@ -1,0 +1,41 @@
+# Runs Prometheus + Grafana against a broker you start yourself
+# (go run ./cmd/broker, or the built binary) - the broker isn't a service
+# here on purpose. Bundling it in is the next Track A item (Docker: a real
+# Dockerfile for the broker, added as a third service to this same file),
+# not this one; see docs/decisions.md for the reasoning.
+#
+# Usage, from this directory:
+#   docker compose up
+# Then open http://localhost:3000 (Grafana) - the "kafka-go" dashboard is
+# already provisioned, no manual datasource setup or JSON import needed.
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    extra_hosts:
+      # host.docker.internal resolves out of the box on Docker Desktop
+      # (Windows/Mac). This line is what makes it also resolve on Linux,
+      # where it doesn't by default - harmless, already-correct no-op on
+      # Docker Desktop, but keeps this reproducible for anyone else who
+      # tries it.
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    image: grafana/grafana:latest
+    depends_on:
+      - prometheus
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    environment:
+      # Anonymous admin access - this is a local dev dashboard, not a
+      # deployed service with real users, so the default admin/admin login
+      # flow would just be friction for zero real security benefit.
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin

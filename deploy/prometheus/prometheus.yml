@@ -1,0 +1,10 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: "kafka-go"
+    static_configs:
+      # The broker runs on the host, not as a container in this compose
+      # file - see docker-compose.yml's own comment for why. 9101 is
+      # metricsAddr in cmd/broker/main.go.
+      - targets: ["host.docker.internal:9101"]
