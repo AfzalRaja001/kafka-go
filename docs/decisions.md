@@ -391,9 +391,13 @@ APIs times 3 percentiles would be an unreadable number of lines on one panel), p
 group lag - the last one deliberately given real estate as its own panel, since "is anything falling behind"
 is usually the first thing anyone actually checks on a real Kafka dashboard.
 
-**Not live-verified against a real Grafana instance** - unlike every other piece this session, this one
-couldn't be, because Docker isn't installed in the environment this was built in. JSON/YAML syntax was
-validated directly (`python -m json.tool`, `yaml.safe_load`), and every cross-reference between files (mount
-paths, service names, ports) was checked by hand for consistency, but actually running `docker compose up` and
-confirming the dashboard renders real data is still outstanding, to be done wherever Docker is actually
-available.
+Docker wasn't installed in the environment this was built in, so JSON/YAML syntax was validated directly
+(`python -m json.tool`, `yaml.safe_load`) and every cross-reference between files (mount paths, service names,
+ports) was checked by hand, without a real `docker compose up` to confirm it. That run happened separately, on
+a machine with Docker: `docker compose up` (foreground) needs its own terminal, since interrupting it to run
+diagnostic commands elsewhere stops the whole stack cleanly (exit code 0, no error - this tripped up the first
+attempt, resolved by using `docker compose up -d` instead) - otherwise the compose file, the provisioning, and
+the dashboard queries all worked exactly as designed on the first real run. Confirmed against real broker
+traffic: 30 real `Produce` requests and a committed offset deliberately short of the latest showed up correctly
+on every panel - request rate, bytes in/out, partition size, and consumer group lag (`10`, matching `30
+produced - 20 committed`) all rendering real numbers, not just structurally valid config.
