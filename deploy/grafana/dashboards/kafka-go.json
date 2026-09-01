@@ -1,0 +1,107 @@
+{
+  "id": null,
+  "uid": "kafka-go-broker",
+  "title": "kafka-go broker",
+  "tags": ["kafka-go"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Request rate by API",
+      "description": "rate(kafkago_requests_total[1m]) by api_key - one line per Kafka API this broker implements.",
+      "gridPos": { "x": 0, "y": 0, "w": 8, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum(rate(kafkago_requests_total[1m])) by (api_key)",
+          "legendFormat": "{{api_key}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Error rate by API",
+      "description": "rate(kafkago_requests_total{result=\"error\"}[1m]) by api_key.",
+      "gridPos": { "x": 8, "y": 0, "w": 8, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum(rate(kafkago_requests_total{result=\"error\"}[1m])) by (api_key)",
+          "legendFormat": "{{api_key}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Bytes in/out rate",
+      "description": "rate(kafkago_request_bytes_total[1m]) by direction.",
+      "gridPos": { "x": 16, "y": 0, "w": 8, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "Bps" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum(rate(kafkago_request_bytes_total[1m])) by (direction)",
+          "legendFormat": "{{direction}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Request latency (p50 / p95 / p99)",
+      "description": "histogram_quantile over kafkago_request_duration_seconds_bucket, aggregated across every API. Edit the query and add api_key to the by() clause for a per-API breakdown.",
+      "gridPos": { "x": 0, "y": 8, "w": 24, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(kafkago_request_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(kafkago_request_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(kafkago_request_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "bargauge",
+      "title": "Partition sizes",
+      "description": "kafkago_partition_bytes - current on-disk log size per topic-partition.",
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "kafkago_partition_bytes",
+          "legendFormat": "{{topic}}-{{partition}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Consumer group lag",
+      "description": "kafkago_consumer_group_lag - how many offsets behind each group's committed position is, per topic-partition. The headline operational-health panel: this is usually the first thing worth checking.",
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "kafkago_consumer_group_lag",
+          "legendFormat": "{{group}} / {{topic}}-{{partition}}"
+        }
+      ]
+    }
+  ]
+}

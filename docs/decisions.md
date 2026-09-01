@@ -360,3 +360,40 @@ group via a hand-crafted `OffsetCommit`, waited for a real collector tick, then 
 `kafkago_consumer_group_lag{...} 6` (10 - 4, correct) and a real, non-trivial `kafkago_partition_bytes` value
 reflecting genuine on-disk bytes including real Kafka record batch framing overhead, not just message
 payloads.
+
+## 2026-08-31 - Grafana dashboard: Prometheus+Grafana in Docker, the broker stays native
+
+The plan lists Track A's Phase 5 items in order: Metrics, Grafana, Docker, benchmarks. Docker - a real
+Dockerfile for the broker itself, bundled into a docker-compose alongside Prometheus and Grafana - is
+explicitly the item *after* this one, not part of it. So this piece needed its own answer to "how does someone
+actually see the dashboard right now": `deploy/docker-compose.yml` runs only `prometheus` and `grafana` as
+containers; the broker keeps running exactly as it always has (`go run ./cmd/broker`, or the built binary),
+with Prometheus's scrape config (`deploy/prometheus/prometheus.yml`) pointing at `host.docker.internal:9101`.
+
+This isn't a throwaway shortcut - when the Docker item lands next, it extends this same compose file by adding
+a third `broker` service (with its own new Dockerfile), not starting from a blank file. `host.docker.internal`
+resolves out of the box on Docker Desktop (Windows/Mac, this project's own dev platform); an `extra_hosts:
+host.docker.internal:host-gateway` entry was added defensively so the same file also works on Linux, where it
+doesn't resolve by default - a no-op on Docker Desktop, but keeps this reproducible for anyone else who tries
+it, which matters for a resume artifact more than it would for internal tooling.
+
+Grafana is provisioned, not manually configured: `grafana/provisioning/datasources/datasource.yml` auto-wires
+the Prometheus datasource, and `grafana/provisioning/dashboards/dashboard-provider.yml` points Grafana at
+`grafana/dashboards/kafka-go.json` on startup. The alternative - click "Add data source," then "Import
+dashboard," paste JSON - works but turns "one command reproduces the screenshot" (the plan's own stated reason
+this piece exists) into a multi-step manual process nobody but the original author will ever bother repeating.
+Anonymous admin access is enabled in the Grafana container (`GF_AUTH_ANONYMOUS_ENABLED`) - this is a local dev
+dashboard with no real users, so the default login flow is pure friction with no real security benefit here.
+
+Panel set follows directly from what the two metrics PRs already export: request rate and error rate by API,
+bytes in/out rate, p50/p95/p99 latency (aggregated across every API rather than split by api_key, since 14
+APIs times 3 percentiles would be an unreadable number of lines on one panel), partition sizes, and consumer
+group lag - the last one deliberately given real estate as its own panel, since "is anything falling behind"
+is usually the first thing anyone actually checks on a real Kafka dashboard.
+
+**Not live-verified against a real Grafana instance** - unlike every other piece this session, this one
+couldn't be, because Docker isn't installed in the environment this was built in. JSON/YAML syntax was
+validated directly (`python -m json.tool`, `yaml.safe_load`), and every cross-reference between files (mount
+paths, service names, ports) was checked by hand for consistency, but actually running `docker compose up` and
+confirming the dashboard renders real data is still outstanding, to be done wherever Docker is actually
+available.

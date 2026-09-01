@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: kafka-go
+    type: file
+    updateIntervalSeconds: 30
+    options:
+      # Matches docker-compose.yml's own mount of ../grafana/dashboards
+      # into this exact path - Grafana loads every .json file it finds
+      # here on startup, no manual import needed.
+      path: /var/lib/grafana/dashboards
