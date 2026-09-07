@@ -1,8 +1,11 @@
-# Runs Prometheus + Grafana against a broker you start yourself
-# (go run ./cmd/broker, or the built binary) - the broker isn't a service
-# here on purpose. Bundling it in is the next Track A item (Docker: a real
-# Dockerfile for the broker, added as a third service to this same file),
-# not this one; see docs/decisions.md for the reasoning.
+# Runs the broker + Prometheus + Grafana together. `docker compose up` here
+# is now fully self-contained - no need to `go run ./cmd/broker` first.
+#
+# The native workflow (running the broker yourself, then just `docker
+# compose up` for the dashboard stack) still works too: prometheus.yml scrapes
+# both this compose broker and host.docker.internal, and whichever one is
+# actually running answers - the other just shows as a down target in
+# Prometheus, which is harmless. See docs/decisions.md for the reasoning.
 #
 # Usage, from this directory:
 #   docker compose up
@@ -10,8 +13,24 @@
 # already provisioned, no manual datasource setup or JSON import needed.
 
 services:
+  broker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    ports:
+      - "9092:9092"
+      - "9101:9101"
+    volumes:
+      # Named volume, not a bind mount: topics and committed offsets survive
+      # `docker compose down`/`up` and container restarts, matching how the
+      # native `go run ./cmd/broker` workflow already behaves (its own
+      # ./data directory persists on disk between runs).
+      - broker-data:/app/data
+
   prometheus:
     image: prom/prometheus:latest
+    depends_on:
+      - broker
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
@@ -39,3 +58,6 @@ services:
       # flow would just be friction for zero real security benefit.
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+
+volumes:
+  broker-data:

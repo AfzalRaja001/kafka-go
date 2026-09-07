@@ -4,7 +4,10 @@ global:
 scrape_configs:
   - job_name: "kafka-go"
     static_configs:
-      # The broker runs on the host, not as a container in this compose
-      # file - see docker-compose.yml's own comment for why. 9101 is
+      # Two targets, not one: "broker" is this compose file's own broker
+      # service (Docker's internal DNS resolves the service name); host.
+      # docker.internal is a broker run natively via `go run ./cmd/broker`.
+      # Only one is ever actually running at a time - the other just shows
+      # as a down target in Prometheus, which is harmless. 9101 is
       # metricsAddr in cmd/broker/main.go.
-      - targets: ["host.docker.internal:9101"]
+      - targets: ["broker:9101", "host.docker.internal:9101"]
