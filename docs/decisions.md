@@ -401,3 +401,40 @@ the dashboard queries all worked exactly as designed on the first real run. Conf
 traffic: 30 real `Produce` requests and a committed offset deliberately short of the latest showed up correctly
 on every panel - request rate, bytes in/out, partition size, and consumer group lag (`10`, matching `30
 produced - 20 committed`) all rendering real numbers, not just structurally valid config.
+
+## 2026-09-03 - Docker: the broker joins the compose stack as its own service
+
+The last piece the 2026-08-31 entry deferred: a real Dockerfile for the broker, added as a third service to
+`deploy/docker-compose.yml` alongside `prometheus` and `grafana`. `docker compose up` is now fully
+self-contained - no `go run ./cmd/broker` needed first.
+
+`deploy/Dockerfile` is a two-stage build. The builder stage uses `golang:1.26` (matching `go.mod`'s `go
+1.26.5`) and compiles with `CGO_ENABLED=0 GOOS=linux` - this project has no cgo dependencies
+(`prometheus/client_golang` is pure Go), so a static binary is both possible and required for the final stage.
+That final stage is `gcr.io/distroless/static-debian12`: no shell, no package manager, nothing but the
+compiled binary. Smallest attack surface and image size, at the cost of not being able to `docker exec` in to
+poke around - debugging a running container relies on its logs and the `/metrics` endpoint instead, which is
+how a real deployment would need to work anyway.
+
+The native workflow isn't going away: `docker-compose.yml`'s `broker` service is the default now, but running
+the broker yourself with `go run ./cmd/broker` and only using Docker for Prometheus + Grafana still works.
+`prometheus.yml`'s `static_configs` lists two targets - `broker:9101` (the compose service, resolved via
+Docker's internal DNS) and `host.docker.internal:9101` (a natively-run broker) - and whichever one is actually
+running answers scrapes normally; the other just shows as a down target in Prometheus's own target list
+(`http://localhost:9090/targets`), which is harmless. This avoids any extra machinery (env var substitution,
+compose profiles, a second compose file) for what's really a one-line difference in scrape target.
+
+The broker's data directory is a named volume (`broker-data`), not a bind mount and not ephemeral: topics,
+records, and committed consumer offsets survive `docker compose down`/`up` and container restarts, matching
+how the native workflow already behaves (its own `./data` directory persists on disk between runs). `docker
+compose down -v` wipes it if a clean slate is ever needed.
+
+Docker's daemon wasn't reachable from the environment this was built in (the CLI is present - Docker Desktop
+is installed - but the daemon socket isn't reachable from that shell), so JSON/YAML syntax was validated by
+hand first (`yaml.safe_load` on both compose files; `go build`/`vet`/`test` all green, unaffected since no Go
+code changed for this piece). Real verification happened separately, on a machine with a running daemon:
+`docker compose up --build` built the broker image and brought up all three services successfully, confirming
+the multi-stage build actually produces a working static binary inside `distroless/static-debian12` (a base
+image with no shell to fall back on if the binary were missing something at runtime), and that the compose
+wiring (ports, the named `broker-data` volume, Prometheus's two-target scrape config) all resolves correctly
+end to end.
