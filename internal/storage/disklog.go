@@ -186,6 +186,17 @@ func (d *DiskLog) LatestOffset(topic string, partition int32) (int64, error) {
 	return p.LogEndOffset(), nil
 }
 
+// Compact delegates straight to Partition.Compact - see the Log interface's
+// own doc comment for the real constraint this comes with (only safe for a
+// topic-partition nothing ever reads by a specific offset).
+func (d *DiskLog) Compact(topic string, partition int32, records [][]byte) error {
+	p, ok := d.getPartition(topic, partition)
+	if !ok {
+		return fmt.Errorf("unknown topic-partition %s-%d", topic, partition)
+	}
+	return p.Compact(records, time.Now().UnixMilli())
+}
+
 func (d *DiskLog) Size(topic string, partition int32) (int64, error) {
 	p, ok := d.getPartition(topic, partition)
 	if !ok {

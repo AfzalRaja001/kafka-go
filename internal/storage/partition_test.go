@@ -78,6 +78,134 @@ func TestPartition_LookupOffsetByTimestamp(t *testing.T) {
 	}
 }
 
+func TestPartition_CompactReplacesRecordsRenumberedFromZero(t *testing.T) {
+	p := openTestPartition(t, 1<<20, 5)
+	defer p.Close()
+
+	for i := 0; i < 10; i++ {
+		p.Append([]byte(fmt.Sprintf("stale-%d", i)), 1, 1000)
+	}
+
+	if err := p.Compact([][]byte{[]byte("kept-a"), []byte("kept-b")}, 2000); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	if got := p.LogEndOffset(); got != 2 {
+		t.Fatalf("LogEndOffset after Compact = %d, want 2", got)
+	}
+
+	data, next, err := p.Read(0)
+	if err != nil {
+		t.Fatalf("Read(0): %v", err)
+	}
+	if string(data) != "kept-a" || next != 1 {
+		t.Errorf("Read(0) = (%q, %d), want (\"kept-a\", 1)", data, next)
+	}
+	data, next, err = p.Read(1)
+	if err != nil {
+		t.Fatalf("Read(1): %v", err)
+	}
+	if string(data) != "kept-b" || next != 2 {
+		t.Errorf("Read(1) = (%q, %d), want (\"kept-b\", 2)", data, next)
+	}
+}
+
+// TestPartition_CompactActuallyReclaimsDiskSpace is the whole point of this
+// feature: old segment files must be gone from disk afterward, not just
+// unreferenced in memory.
+func TestPartition_CompactActuallyReclaimsDiskSpace(t *testing.T) {
+	// Tiny segmentMaxBytes forces several segment rolls, so this proves
+	// Compact cleans up every old segment file, not just the active one.
+	p := openTestPartition(t, 40, 1000)
+	defer p.Close()
+
+	for i := 0; i < 20; i++ {
+		p.Append([]byte(fmt.Sprintf("stale-record-%d", i)), 1, 1000)
+	}
+	if len(p.segments) < 2 {
+		t.Fatalf("test setup: expected multiple segments before compaction, got %d", len(p.segments))
+	}
+
+	before := p.Size()
+
+	staleBases := make([]int64, len(p.segments))
+	for i, sg := range p.segments {
+		staleBases[i] = sg.baseOffset
+	}
+
+	if err := p.Compact([][]byte{[]byte("k")}, 2000); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	after := p.Size()
+	if after >= before {
+		t.Errorf("Size after Compact = %d, want less than before (%d)", after, before)
+	}
+
+	for _, base := range staleBases {
+		if base == 0 {
+			continue // base 0 is legitimately reused for the fresh, compacted segment
+		}
+		logPath := segmentFileBase(p.dir, base) + ".log"
+		if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+			t.Errorf("stale segment file %s still exists after Compact (err=%v)", logPath, err)
+		}
+	}
+}
+
+func TestPartition_CompactWithNoRecordsLeavesPartitionEmpty(t *testing.T) {
+	p := openTestPartition(t, 1<<20, 5)
+	defer p.Close()
+
+	p.Append([]byte("stale"), 1, 1000)
+
+	if err := p.Compact(nil, 2000); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	if got := p.LogEndOffset(); got != 0 {
+		t.Fatalf("LogEndOffset after compacting to nothing = %d, want 0", got)
+	}
+	if _, _, err := p.Read(0); err == nil {
+		t.Error("expected Read(0) to error on an empty partition, got nil")
+	}
+}
+
+// TestPartition_CompactSurvivesReopen proves Compact's result is real,
+// durable on-disk state, not just an in-memory illusion - the same
+// distinction OpenPartition's own restart-recovery logic exists to protect.
+func TestPartition_CompactSurvivesReopen(t *testing.T) {
+	dir := t.TempDir()
+	p, err := OpenPartition(dir, 1<<20, 5)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	for i := 0; i < 5; i++ {
+		p.Append([]byte(fmt.Sprintf("stale-%d", i)), 1, 1000)
+	}
+	if err := p.Compact([][]byte{[]byte("kept")}, 2000); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	reopened, err := OpenPartition(dir, 1<<20, 5)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close()
+
+	if got := reopened.LogEndOffset(); got != 1 {
+		t.Fatalf("LogEndOffset after reopen = %d, want 1", got)
+	}
+	data, _, err := reopened.Read(0)
+	if err != nil || string(data) != "kept" {
+		t.Fatalf("Read(0) after reopen = (%q, %v), want (\"kept\", nil)", data, err)
+	}
+}
+
 func TestPartition_ConcurrentAppend_Safe(t *testing.T) {
 	p := openTestPartition(t, 1<<20, 5)
 	defer p.Close()

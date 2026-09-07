@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // segmentGroup is one segment file plus its two sparse indexes, all sharing
@@ -149,7 +150,13 @@ func openSegmentGroup(dir string, baseOffset int64) (*segmentGroup, error) {
 func (p *Partition) Append(data []byte, offsetSpan int32, timestamp int64) (int64, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.appendLocked(data, offsetSpan, timestamp)
+}
 
+// appendLocked is Append's real body, split out so Compact can append its
+// replacement records without re-entering p.mu - callers must already hold
+// it (exclusively).
+func (p *Partition) appendLocked(data []byte, offsetSpan int32, timestamp int64) (int64, error) {
 	// Every append must advance the log by at least one offset. A batch
 	// claiming zero would leave the next append sharing its base offset,
 	// making the earlier blob permanently unreachable (FindRecord would
@@ -189,6 +196,73 @@ func (p *Partition) Append(data []byte, offsetSpan int32, timestamp int64) (int6
 	p.nextOffset.Add(int64(offsetSpan))
 
 	return offset, nil
+}
+
+// Compact fully replaces this partition's on-disk log with records, each
+// becoming one blob at a freshly renumbered offset starting at 0. Every
+// existing segment (its .log, .index, and .timeindex files) is closed and
+// deleted before the replacement is written - that deletion is the actual
+// space reclamation this feature exists for, not just an in-memory swap.
+//
+// See the Log interface's own doc comment for why this renumbers rather
+// than preserving original offsets: safe only for a partition nothing ever
+// reads by a specific offset, only by full sequential replay from 0.
+func (p *Partition) Compact(records [][]byte, timestamp int64) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	staleBases := make([]int64, len(p.segments))
+	for i, sg := range p.segments {
+		staleBases[i] = sg.baseOffset
+		if err := sg.seg.Close(); err != nil {
+			return err
+		}
+		if err := sg.idx.Close(); err != nil {
+			return err
+		}
+		if err := sg.timeindex.Close(); err != nil {
+			return err
+		}
+	}
+	// Every old file must be gone before opening the replacement below -
+	// OpenSegment/OpenIndex/OpenTimeindex all open with O_APPEND, not
+	// O_TRUNC, so reopening base offset 0 without removing its old files
+	// first would silently append the fresh records after the stale ones
+	// instead of replacing them.
+	for _, base := range staleBases {
+		if err := removeSegmentGroupFiles(p.dir, base); err != nil {
+			return err
+		}
+	}
+
+	fresh, err := openSegmentGroup(p.dir, 0)
+	if err != nil {
+		return err
+	}
+	p.segments = []*segmentGroup{fresh}
+	p.nextOffset.Store(0)
+	p.sinceLastIdx = 0
+
+	for _, data := range records {
+		if _, err := p.appendLocked(data, 1, timestamp); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// removeSegmentGroupFiles deletes one segment's three files. Windows can
+// briefly hold a file handle open past Close() returning, the same reason
+// DiskLog.DeletePartition retries os.RemoveAll on the whole partition
+// directory - the same defense applies here at the individual-file level.
+func removeSegmentGroupFiles(dir string, base int64) error {
+	name := segmentFileBase(dir, base)
+	for _, ext := range []string{".log", ".index", ".timeindex"} {
+		if err := removeAllWithRetry(os.Remove, name+ext, 5, 20*time.Millisecond); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // findSegment returns the segment whose base offset is the largest one not

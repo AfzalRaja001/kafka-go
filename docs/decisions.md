@@ -519,3 +519,68 @@ the multi-stage build actually produces a working static binary inside `distrole
 image with no shell to fall back on if the binary were missing something at runtime), and that the compose
 wiring (ports, the named `broker-data` volume, Prometheus's two-target scrape config) all resolves correctly
 end to end.
+
+## 2026-09-07 - Real compaction for __consumer_offsets, scoped away from general Kafka compaction
+
+Phase 5 Track B's last item: log compaction, deferred since PR #19's design entry promised
+`__consumer_offsets` would "get it for free" once this landed. It didn't turn out to be free, and it isn't
+general - both discovered before writing any code.
+
+Real Kafka compaction operates on individual *records* inside a partition, and a single record batch can hold
+many records under different keys - compacting one means decomposing and reassembling batches, recomputing
+CRCs and offsets for whatever survives. This project has one foundational, repeated principle - store batch
+bytes verbatim, never re-encode - that real compaction would break for the first time. Checking what
+`__consumer_offsets` (`internal/offsets/store.go`) actually needs changed the picture entirely: it doesn't use
+real Kafka record batches at all, only its own custom one-record-per-blob encoding, and `LogBackedStore`
+already tracks the latest value per key in memory (`s.latest`) as a side effect of just existing. The hard
+part general compaction usually requires - figuring out what's still needed - was already solved; what was
+missing was only the mechanism to physically reclaim the space. So this piece scopes to exactly that:
+internal-only, `__consumer_offsets`-specific, not a general `cleanup.policy=compact` feature for client topics.
+
+A second discovery, digging into the segment format before writing anything: a blob's offset is never stored
+on disk, only derived by summing each blob's span forward from a known starting point (0, or a sparse index
+entry). There's no way to represent a *gap* where a compacted-away record used to be - which is exactly what
+real Kafka's compacted topics have (a Fetch at a removed offset returns the next surviving record). Supporting
+that would mean a real on-disk format change. Instead, since `__consumer_offsets` is only ever replayed
+sequentially from offset 0 at startup (`internal/offsets`'s own doc comment: nothing outside this broker
+Fetches it over the wire, ever), `Compact` sidesteps the whole problem: it fully rewrites a partition from
+scratch, renumbering offsets from 0. `storage.Log` gains its fourth deliberate extension,
+`Compact(topic, partition, records)`, documented plainly as unsafe for anything a real client might Fetch by
+offset - true today of nothing but this one internal topic.
+
+`Partition.Compact` (`internal/storage/partition.go`) is the real mechanism: close and delete every existing
+segment's three files (`.log`, `.index`, `.timeindex` - actual deletion, the actual space reclamation this
+exists for, not just an in-memory swap), open a fresh segment at base offset 0, and re-append the given records
+through the same `appendLocked` path normal `Append` already uses (split out from `Append` specifically so
+`Compact` can reuse it without re-entering the partition's own mutex). One real gotcha: `OpenSegment`/
+`OpenIndex`/`OpenTimeindex` all open with `O_APPEND`, not `O_TRUNC` - reopening base offset 0 without first
+deleting its old files would silently append the fresh records after the stale ones instead of replacing them,
+since a segment's offset numbering is entirely position-derived, not stored. `FakeLog.Compact` does the
+equivalent in-memory swap, keeping `FakeLog`/`DiskLog` symmetric the same way every prior `Log` extension has.
+
+`LogBackedStore.Compact()` snapshots `s.latest`, re-encodes each entry with the existing `encodeCommit`, and
+hands the result to `log.Compact` - genuinely trivial, since the "what's still needed" computation was already
+being done. What wasn't trivial: `Commit` previously appended to the log *before* taking `s.mu`, only locking
+around the in-memory update - a real race, where a `Commit` running concurrently with `Compact`'s
+snapshot-then-rewrite could append to the log being replaced and have that commit silently vanish once the
+rewrite finished. Fixed by having `Commit` hold `s.mu` around its entire body (append and apply both), the same
+lock `Compact` holds around its entire operation - fully serializing the two against each other. A real,
+minor behavior change (commits now briefly contend with compaction, not just with each other's in-memory
+update), worth naming explicitly, verified clean under `go test -race` with a test that runs 200 concurrent
+commits against 20 concurrent compactions on the same store.
+
+Trigger is a background ticker (`runOffsetsCompactor` in `cmd/broker/main.go`), same shape as `runReaper`/
+`runMetricsCollector` - 5 minutes, deliberately much slower than either of those, since this is disk-space
+housekeeping on a low-traffic internal topic, not correctness-critical or latency-sensitive. A failed
+compaction is logged, not fatal - `s.latest` already holds the correct answer regardless of whether the
+on-disk rewrite succeeded, so a failure just means trying again next tick, not any loss of correctness.
+
+Verified against a real running broker, with the interval temporarily shortened to 3s for the verification run
+(reverted to 5 minutes before this was written up): 100 real `OffsetCommit` requests for the same key grew the
+partition's segment file from 202 to 6902 bytes; waiting for the ticker to fire brought it straight back down
+to 202 bytes. A real `OffsetFetch` afterward correctly returned the latest committed offset (100), and - the
+property this whole feature exists for - a full broker restart against the compacted, renumbered log replayed
+it correctly, still reporting offset 100 with the file still at its compacted 202-byte size, not re-bloated.
+
+This closes out Phase 5 Track B's log compaction item and, with it, everything Phase 5 originally scoped for
+both tracks.

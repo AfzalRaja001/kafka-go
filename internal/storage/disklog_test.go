@@ -348,3 +348,53 @@ func TestDiskLog_SizeSumsAcrossRolledSegments(t *testing.T) {
 		t.Errorf("Size = %d, want %d (sum of every record's payload+header, across every segment)", got, want)
 	}
 }
+
+func TestDiskLog_CompactReplacesRecordsAndReclaimsSpace(t *testing.T) {
+	log := NewDiskLog(t.TempDir(), 1<<20, 5)
+	defer log.Close()
+
+	for i := 0; i < 10; i++ {
+		log.Append("__consumer_offsets", 0, []byte(fmt.Sprintf("stale-%d", i)), 1)
+	}
+	before, err := log.Size("__consumer_offsets", 0)
+	if err != nil {
+		t.Fatalf("Size before: %v", err)
+	}
+
+	if err := log.Compact("__consumer_offsets", 0, [][]byte{[]byte("kept")}); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	after, err := log.Size("__consumer_offsets", 0)
+	if err != nil {
+		t.Fatalf("Size after: %v", err)
+	}
+	if after >= before {
+		t.Errorf("Size after Compact = %d, want less than before (%d)", after, before)
+	}
+
+	latest, err := log.LatestOffset("__consumer_offsets", 0)
+	if err != nil {
+		t.Fatalf("LatestOffset: %v", err)
+	}
+	if latest != 1 {
+		t.Errorf("LatestOffset after Compact = %d, want 1", latest)
+	}
+
+	data, err := log.Read("__consumer_offsets", 0, 0, 1024)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if string(data) != "kept" {
+		t.Errorf("Read after Compact = %q, want %q", data, "kept")
+	}
+}
+
+func TestDiskLog_CompactUnknownTopicPartitionErrors(t *testing.T) {
+	log := NewDiskLog(t.TempDir(), 1<<20, 5)
+	defer log.Close()
+
+	if err := log.Compact("missing", 0, [][]byte{[]byte("x")}); err == nil {
+		t.Fatal("expected an error for an unknown topic-partition, got nil")
+	}
+}

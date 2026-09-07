@@ -250,6 +250,143 @@ func TestLogBackedStore_GroupsSurvivesRestart(t *testing.T) {
 	}
 }
 
+func TestLogBackedStore_CompactReclaimsSpaceAndKeepsLatestValue(t *testing.T) {
+	log := storage.NewFakeLog()
+	store, err := NewLogBackedStore(log)
+	if err != nil {
+		t.Fatalf("NewLogBackedStore: %v", err)
+	}
+
+	for i := int64(1); i <= 20; i++ {
+		store.Commit("my-group", "orders", 0, i, "")
+	}
+	before, err := log.Size(topicName, partitionID)
+	if err != nil {
+		t.Fatalf("Size before: %v", err)
+	}
+
+	if err := store.Compact(); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	after, err := log.Size(topicName, partitionID)
+	if err != nil {
+		t.Fatalf("Size after: %v", err)
+	}
+	if after >= before {
+		t.Errorf("Size after Compact = %d, want less than before (%d) - 20 commits to one key should compact to 1 record", after, before)
+	}
+
+	offset, _, found := store.Fetch("my-group", "orders", 0)
+	if !found || offset != 20 {
+		t.Errorf("Fetch after Compact = %d, %v, want 20, true", offset, found)
+	}
+}
+
+// TestLogBackedStore_CompactPreservesEveryDistinctKey proves Compact doesn't
+// just keep "the last record written" - it must keep the latest value for
+// every distinct (group, topic, partition), not collapse them together.
+func TestLogBackedStore_CompactPreservesEveryDistinctKey(t *testing.T) {
+	store, err := NewLogBackedStore(storage.NewFakeLog())
+	if err != nil {
+		t.Fatalf("NewLogBackedStore: %v", err)
+	}
+
+	store.Commit("group-a", "orders", 0, 5, "")
+	store.Commit("group-a", "orders", 1, 7, "")
+	store.Commit("group-b", "orders", 0, 99, "")
+	store.Commit("group-a", "orders", 0, 6, "") // overwrite group-a/orders/0
+
+	if err := store.Compact(); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	tests := []struct {
+		group     string
+		partition int32
+		want      int64
+	}{
+		{"group-a", 0, 6},
+		{"group-a", 1, 7},
+		{"group-b", 0, 99},
+	}
+	for _, tt := range tests {
+		offset, _, found := store.Fetch(tt.group, "orders", tt.partition)
+		if !found || offset != tt.want {
+			t.Errorf("Fetch(%s, orders, %d) after Compact = %d, %v, want %d, true", tt.group, tt.partition, offset, found, tt.want)
+		}
+	}
+}
+
+// TestLogBackedStore_CompactThenRestartReplaysCorrectly proves Compact's
+// output is genuinely replayable from scratch, not just correct in the
+// already-running instance's own memory - the same restart property every
+// other LogBackedStore behavior is held to.
+func TestLogBackedStore_CompactThenRestartReplaysCorrectly(t *testing.T) {
+	dir := t.TempDir()
+
+	log := storage.NewDiskLog(dir, 1<<20, 5)
+	store, err := NewLogBackedStore(log)
+	if err != nil {
+		t.Fatalf("NewLogBackedStore: %v", err)
+	}
+	store.Commit("my-group", "orders", 0, 1, "")
+	store.Commit("my-group", "orders", 0, 2, "")
+	store.Commit("my-group", "orders", 0, 3, "")
+	store.Commit("other-group", "payments", 0, 10, "")
+
+	if err := store.Compact(); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	reopened := storage.NewDiskLog(dir, 1<<20, 5)
+	defer reopened.Close()
+	restarted, err := NewLogBackedStore(reopened)
+	if err != nil {
+		t.Fatalf("NewLogBackedStore after restart: %v", err)
+	}
+
+	offset, _, found := restarted.Fetch("my-group", "orders", 0)
+	if !found || offset != 3 {
+		t.Errorf("Fetch(my-group, orders, 0) after restart = %d, %v, want 3, true", offset, found)
+	}
+	offset, _, found = restarted.Fetch("other-group", "payments", 0)
+	if !found || offset != 10 {
+		t.Errorf("Fetch(other-group, payments, 0) after restart = %d, %v, want 10, true", offset, found)
+	}
+}
+
+// TestLogBackedStore_CommitAndCompactConcurrently proves the Commit/Compact
+// locking fix actually serializes them - run with -race, this is what would
+// flag a Commit's append landing on a log Compact is concurrently replacing.
+func TestLogBackedStore_CommitAndCompactConcurrently(t *testing.T) {
+	store, err := NewLogBackedStore(storage.NewFakeLog())
+	if err != nil {
+		t.Fatalf("NewLogBackedStore: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := int64(0); i < 200; i++ {
+			store.Commit("my-group", "orders", 0, i, "")
+		}
+	}()
+	for i := 0; i < 20; i++ {
+		store.Compact()
+	}
+	<-done
+
+	offset, _, found := store.Fetch("my-group", "orders", 0)
+	if !found {
+		t.Fatal("Fetch after concurrent commit/compact = not found, want found")
+	}
+	t.Logf("final offset after concurrent commit/compact: %d", offset)
+}
+
 func TestNewLogBackedStore_CorruptDataReturnsError(t *testing.T) {
 	log := storage.NewFakeLog()
 	if err := log.CreatePartition(topicName, partitionID); err != nil {

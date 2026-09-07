@@ -27,4 +27,19 @@ type Log interface {
 	// topic-partition's existence as something Append alone establishes.
 	CreatePartition(topic string, partition int32) error
 	DeletePartition(topic string, partition int32) error
+
+	// Compact fully replaces a topic-partition's log with records, each
+	// becoming one blob at a freshly renumbered offset starting at 0.
+	//
+	// This is NOT real Kafka compaction, which preserves original offsets
+	// and leaves gaps where removed records used to be - this segment
+	// format has no way to represent a gap at all, since a blob's offset is
+	// only ever derived by summing spans forward from a known starting
+	// point, never stored explicitly. Renumbering from 0 sidesteps that
+	// entirely, at the cost of a real constraint: Compact is only safe for
+	// a topic-partition that is never read by a specific offset, only ever
+	// replayed sequentially from 0. That's true today of __consumer_offsets
+	// (see internal/offsets) and nothing else - do not call this on a
+	// topic-partition a real client might Fetch.
+	Compact(topic string, partition int32, records [][]byte) error
 }
