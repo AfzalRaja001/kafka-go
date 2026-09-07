@@ -14,7 +14,9 @@ func encodeListOffsetsRequest(topic string, partition int32, timestamp int64) []
 	enc.Int32(1) // partition count
 	enc.Int32(partition)
 	enc.Int64(timestamp)
-	enc.Int32(1) // max_num_offsets: decoded, not used - we always return one
+	// No max_num_offsets: that field only existed in v0's "many offsets per
+	// partition" array response, removed in v1 now that each partition
+	// resolves to exactly one offset.
 	return enc.Result()
 }
 
@@ -34,7 +36,9 @@ func TestDecodeListOffsetsRequest(t *testing.T) {
 	}
 }
 
-func decodeListOffsetsPartitionResponse(t *testing.T, resp []byte) (errorCode int16, offsets []int64) {
+// decodeListOffsetsPartitionResponse decodes a v1 response body: one offset
+// per partition (plus its resolved timestamp), not the v0 array shape.
+func decodeListOffsetsPartitionResponse(t *testing.T, resp []byte) (errorCode int16, timestamp, offset int64) {
 	t.Helper()
 	dec := NewDecoder(resp)
 	dec.Int32() // correlation_id
@@ -43,12 +47,9 @@ func decodeListOffsetsPartitionResponse(t *testing.T, resp []byte) (errorCode in
 	dec.Int32() // partition count
 	dec.Int32() // partition
 	errorCode, _ = dec.Int16()
-	count, _ := dec.Int32()
-	for i := int32(0); i < count; i++ {
-		offset, _ := dec.Int64()
-		offsets = append(offsets, offset)
-	}
-	return errorCode, offsets
+	timestamp, _ = dec.Int64()
+	offset, _ = dec.Int64()
+	return errorCode, timestamp, offset
 }
 
 func TestHandleListOffsets_ResolvesEarliest(t *testing.T) {
@@ -63,12 +64,12 @@ func TestHandleListOffsets_ResolvesEarliest(t *testing.T) {
 		t.Fatalf("HandleListOffsets: %v", err)
 	}
 
-	errorCode, offsets := decodeListOffsetsPartitionResponse(t, resp)
+	errorCode, _, offset := decodeListOffsetsPartitionResponse(t, resp)
 	if errorCode != ErrNone {
 		t.Fatalf("error_code = %d, want %d", errorCode, ErrNone)
 	}
-	if len(offsets) != 1 || offsets[0] != 0 {
-		t.Errorf("offsets = %v, want [0]", offsets)
+	if offset != 0 {
+		t.Errorf("offset = %d, want 0", offset)
 	}
 }
 
@@ -84,12 +85,12 @@ func TestHandleListOffsets_ResolvesLatest(t *testing.T) {
 		t.Fatalf("HandleListOffsets: %v", err)
 	}
 
-	errorCode, offsets := decodeListOffsetsPartitionResponse(t, resp)
+	errorCode, _, offset := decodeListOffsetsPartitionResponse(t, resp)
 	if errorCode != ErrNone {
 		t.Fatalf("error_code = %d, want %d", errorCode, ErrNone)
 	}
-	if len(offsets) != 1 || offsets[0] != 3 {
-		t.Errorf("offsets = %v, want [3]", offsets)
+	if offset != 3 {
+		t.Errorf("offset = %d, want 3", offset)
 	}
 }
 
@@ -102,19 +103,19 @@ func TestHandleListOffsets_UnknownTopicPartitionReturnsError(t *testing.T) {
 		t.Fatalf("HandleListOffsets: %v", err)
 	}
 
-	errorCode, offsets := decodeListOffsetsPartitionResponse(t, resp)
+	errorCode, timestamp, offset := decodeListOffsetsPartitionResponse(t, resp)
 	if errorCode != ErrUnknownTopicOrPartition {
 		t.Errorf("error_code = %d, want %d", errorCode, ErrUnknownTopicOrPartition)
 	}
-	if len(offsets) != 0 {
-		t.Errorf("offsets = %v, want empty on error", offsets)
+	if timestamp != -1 || offset != -1 {
+		t.Errorf("timestamp/offset = %d/%d, want -1/-1 on error", timestamp, offset)
 	}
 }
 
 // TestHandleListOffsets_UnsupportedTimestampReturnsError is a scope
 // boundary test: this broker only resolves the two sentinel values
-// (earliest/latest) at v0, not arbitrary timestamps via the time index -
-// documented in the ListOffsets lesson write-up as a deliberate v0
+// (earliest/latest), not arbitrary timestamps via the time index -
+// documented in the ListOffsets lesson write-up as a deliberate
 // simplification, the same way Fetch documents its per-partition min_bytes
 // check as a simplification rather than a bug.
 func TestHandleListOffsets_UnsupportedTimestampReturnsError(t *testing.T) {
@@ -127,11 +128,11 @@ func TestHandleListOffsets_UnsupportedTimestampReturnsError(t *testing.T) {
 		t.Fatalf("HandleListOffsets: %v", err)
 	}
 
-	errorCode, offsets := decodeListOffsetsPartitionResponse(t, resp)
+	errorCode, timestamp, offset := decodeListOffsetsPartitionResponse(t, resp)
 	if errorCode != ErrUnknownServerError {
 		t.Errorf("error_code = %d, want %d", errorCode, ErrUnknownServerError)
 	}
-	if len(offsets) != 0 {
-		t.Errorf("offsets = %v, want empty on error", offsets)
+	if timestamp != -1 || offset != -1 {
+		t.Errorf("timestamp/offset = %d/%d, want -1/-1 on error", timestamp, offset)
 	}
 }

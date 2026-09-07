@@ -401,3 +401,85 @@ the dashboard queries all worked exactly as designed on the first real run. Conf
 traffic: 30 real `Produce` requests and a committed offset deliberately short of the latest showed up correctly
 on every panel - request rate, bytes in/out, partition size, and consumer group lag (`10`, matching `30
 produced - 20 committed`) all rendering real numbers, not just structurally valid config.
+
+## 2026-09-07 - Throughput/latency benchmark, and a real ListOffsets v0->v1 bump it forced
+
+The last item on Phase 5 Track A's list: `cmd/benchmark`, a new command that drives real, concurrent Produce
+and Fetch load against a running broker over the actual Kafka wire protocol - via `github.com/twmb/franz-go`
+(`pkg/kgo` + `pkg/kadm`), a real client, not calls into this project's own internal packages - and prints
+throughput and latency percentiles for each phase. This is this project's second external dependency (the
+first was `prometheus/client_golang`), scoped narrowly: only `cmd/benchmark` imports it.
+
+Design: `producers` goroutines (default 4), each its own client connection, produce fixed-size records as
+fast as possible for a configurable `duration`. Then `consumers` goroutines (default 4), each its own client
+connection, independently read the *entire* topic from the beginning - simulating that many separate
+consuming applications, not splitting the work between them. Every knob (broker address, topic, record size,
+concurrency, duration) is a CLI flag, not a hardcoded const like `cmd/broker/main.go` - a benchmark's whole
+purpose is answering "how does this behave under different load shapes," so hardcoding those would defeat the
+point. Percentile/throughput math (`cmd/benchmark/stats.go`'s `Summarize`) is a pure, TDD-covered function;
+the actual load generation is untested glue, verified by running it against a real broker and confirming the
+numbers make sense - the same pure/impure split `collectMetrics`/`runMetricsCollector` used in the metrics
+work.
+
+Three real bugs surfaced by actually running this against a real broker, not just getting it to compile:
+
+1. **`ensureTopic`'s "already exists is fine" check was checking the wrong thing.** `kadm.Client.CreateTopic`
+   returns `(CreateTopicResponse, error)` where the second return value *is* `response.Err` - not two
+   independent signals. The first draft checked `err != nil` (returning early) before ever reaching the
+   explicit `errors.Is(resp.Err, kerr.TopicAlreadyExists)` tolerance check below it, so re-running the
+   benchmark against an already-created topic always failed. Fixed by checking `errors.Is` against the single
+   error `CreateTopic` actually returns.
+
+2. **`ListOffsets` needed a real v0->v1 bump - a genuine compatibility gap, not a benchmark-tool bug.** The
+   fetch phase needs to know the topic's true latest offset to know when it's caught up; `kadm.ListEndOffsets`
+   is the obvious way to ask. It kept coming back with `Offset: -1, Err: nil` - not an error, just silently
+   wrong. Tracked down using two things: a hand-rolled raw-socket request (bypassing kmsg entirely) proved the
+   broker's own v0 response bytes were correct and decodable by hand, and `kgo.WithLogger` at debug level
+   showed franz-go genuinely sending and receiving a well-formed `ListOffsets v0` request/response with no
+   error. Reading kmsg's own generated decoder (`ListOffsetsResponse.readFrom`) settled it: v0's response
+   shape is an *array* of offsets per partition (`OldStyleOffsets` in kmsg's naming); the scalar `.Offset`
+   field kadm's convenience API actually reads is only populated for v1+, where each partition resolves to
+   exactly one offset instead of an array. This broker deliberately only ever implemented v0 (real Kafka's own
+   history: v1 simplified the array away specifically because no client ever asked for more than one offset
+   per partition) - so any client whose high-level admin API reads the modern scalar field, not just clients
+   built specifically to expect the old array, cannot get a real answer from this broker as it stood. Fixed
+   the same way `Metadata` went v0->v1 and `OffsetFetch` went v0->v2: bumped `ListOffsets` to v1 outright (not
+   dual-maintained), matching this project's standing rule of advertising exactly one version, the lowest one
+   that does what's needed. `internal/protocol/listoffsets.go`'s request decode dropped v0's now-removed
+   `max_num_offsets` field; the response now writes one `(timestamp, offset)` pair per partition instead of an
+   array - `timestamp` is always encoded as -1 ("not applicable"), the same treatment `Metadata` v1 gave
+   `Rack`/`IsInternal`, since this broker has nowhere to look up when a given offset was actually written.
+
+3. **The fetch phase's first live run was nearly useless as a benchmark, for two compounding reasons.**
+   First measurement: a single Fetch call took 5.68 real seconds and returned ~1MB (5295 records) in one
+   shot - `kgo`'s default `FetchMaxPartitionBytes` is 1MB, the same default real Kafka clients (Java, Python)
+   ship with, so this isn't a franz-go quirk, it's a genuine characteristic of `DiskLog.Read`
+   (`internal/storage/disklog.go`): it accumulates a response one record at a time via `Partition.Read`, each
+   call a separate read against the segment file, so filling a ~1MB response out of 128-byte records means
+   several thousand individual reads - real, measurable per-call overhead that adds up. That's a legitimate
+   finding about current read-path performance, worth a real follow-up, but not something to silently paper
+   over inside a benchmark tool - flagged separately rather than "fixed" here, since optimizing
+   `DiskLog.Read`'s batching is real, separate work with its own design questions, not an incidental fix. What
+   *did* belong in this piece: two giant, multi-second fetches produced only two latency samples - technically
+   correct, useless as a distribution. Second bug, in `cmd/benchmark/stats.go` itself: `Summarize`'s `Records`
+   field was `len(latencies)`, which is exactly the record count for Produce (one record per request) but
+   wildly wrong for Fetch (one request can carry thousands of records) - a live run reported "132 records,
+   6.48 MB," an internally-inconsistent result once max-partition-bytes was reduced enough to produce more
+   samples. Fixed by decoupling them: `Summarize` now takes an explicit `records` count separate from
+   `len(latencies)` - percentiles still come from the per-request latency samples, throughput from the real
+   record count. Combined with a new `-fetch-max-bytes` flag (default 64KB, well under `kgo`'s 1MB default) to
+   get enough real round-trips for percentiles to mean something, this is what turned "one measurement,
+   basically meaningless" into "a real, honest latency distribution."
+
+Verified against a real broker end to end, several times: produce phase numbers looked sane immediately
+(~8-10k records/sec on this machine); fetch phase, after all three fixes, produced internally-consistent
+results (e.g. one run: 2 consumers each independently re-reading a freshly-produced 3856-record topic ->
+`Fetch: 7712 records` reported, exactly `2 x 3856`) and correctly picked up pre-existing data on a re-run
+against an already-populated topic (a topic left over from a previous run with 3856 records, re-run adding
+1869 more, correctly reported `Fetch: 5725 records` = `3856 + 1869`). The Fetch phase's own throughput numbers
+honestly reflect a broker whose read path is currently far slower than its write path for many-small-records
+workloads - a real, reportable characteristic of this broker today, not a bug in the benchmark that measured
+it.
+
+This closes out Phase 5 Track A - Metrics, Grafana, Docker, and now Benchmarks are all shipped and
+live-verified.

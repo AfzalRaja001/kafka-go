@@ -28,7 +28,11 @@ type ListOffsetsRequest struct {
 	Topics    []ListOffsetsTopicRequest
 }
 
-// DecodeListOffsetsRequest decodes a ListOffsets v0 request body.
+// DecodeListOffsetsRequest decodes a ListOffsets v1 request body. v1 dropped
+// v0's max_num_offsets field - v0 could return several candidate offsets per
+// partition (an array), but every real client only ever wants exactly one
+// (the offset for a single timestamp), so v1 simplifies the response to a
+// single value and the request no longer needs to say how many to return.
 func DecodeListOffsetsRequest(buf []byte) (ListOffsetsRequest, error) {
 	dec := NewDecoder(buf)
 
@@ -63,13 +67,6 @@ func DecodeListOffsetsRequest(buf []byte) (ListOffsetsRequest, error) {
 			if err != nil {
 				return ListOffsetsRequest{}, fmt.Errorf("topic %d partition %d timestamp: %w", i, j, err)
 			}
-			// max_num_offsets: a v0-only field capping how many offsets to
-			// return per partition. We always resolve exactly one, so it's
-			// decoded (to stay framed correctly for whatever follows) and
-			// discarded, the same treatment client_id gets in dispatch.go.
-			if _, err := dec.Int32(); err != nil {
-				return ListOffsetsRequest{}, fmt.Errorf("topic %d partition %d max_num_offsets: %w", i, j, err)
-			}
 			parts = append(parts, ListOffsetsPartitionRequest{Partition: partition, Timestamp: timestamp})
 		}
 		topics = append(topics, ListOffsetsTopicRequest{Topic: topic, Partitions: parts})
@@ -78,10 +75,18 @@ func DecodeListOffsetsRequest(buf []byte) (ListOffsetsRequest, error) {
 	return ListOffsetsRequest{ReplicaID: replicaID, Topics: topics}, nil
 }
 
-// HandleListOffsets builds a ListOffsets v0 response body, resolving each
+// HandleListOffsets builds a ListOffsets v1 response body, resolving each
 // requested partition's timestamp sentinel against the log. -1 resolves to
 // the log's latest (end) offset, -2 to its earliest (start) offset - the
-// two cases a consumer needs for seek_to_end/seek_to_beginning.
+// two cases a consumer needs for seek_to_end/seek_to_beginning. Each
+// partition gets exactly one (timestamp, offset) pair, not v0's array of
+// offsets - this broker never had a reason to return more than one anyway,
+// so v1's simpler shape costs nothing while fixing a real compatibility gap:
+// v0's array-shaped response predates a scalar `Offset` field existing on
+// the wire at all, so any client whose response-parsing code reads that
+// scalar field (real Kafka's own admin tooling, and every mainstream client
+// library's high-level API since v1) sees an unpopulated offset - it never
+// existed at v0 - against a broker that only speaks v0.
 func HandleListOffsets(correlationID int32, requestBody []byte, log storage.Log) ([]byte, error) {
 	req, err := DecodeListOffsetsRequest(requestBody)
 	if err != nil {
@@ -101,10 +106,17 @@ func HandleListOffsets(correlationID int32, requestBody []byte, log storage.Log)
 			enc.Int32(part.Partition)
 			enc.Int16(errorCode)
 			if errorCode != ErrNone {
-				enc.Int32(0) // offsets: empty array
+				enc.Int64(-1) // timestamp: unknown
+				enc.Int64(-1) // offset: unknown
 				continue
 			}
-			enc.Int32(1) // offsets: exactly one element, this broker never returns more
+			// This broker doesn't track per-record wall-clock timestamps
+			// anywhere resolveOffset can reach, so -1 ("not applicable") is
+			// reported here the same way Metadata v1 reported Rack/
+			// IsInternal as their "not applicable" values - a real client
+			// asking for seek_to_beginning/seek_to_end only ever reads the
+			// offset field, not this timestamp.
+			enc.Int64(-1)
 			enc.Int64(offset)
 		}
 	}
