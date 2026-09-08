@@ -142,6 +142,29 @@ func (f *FakeLog) DeletePartition(topic string, partition int32) error {
 // has no segments at all), so this is fine for what FakeLog exists for:
 // fast handler tests that care about relative size/existence, not exact
 // on-disk footprint.
+// Compact replaces every batch for a topic-partition with records, each
+// becoming a fresh entry starting at offset 0 - see the Log interface's own
+// doc comment for why this renumbers rather than preserving original
+// offsets. The topic-partition must already exist (matches Read/
+// EarliestOffset/LatestOffset's contract: Compact never fabricates storage
+// for something that was never Appended to or CreatePartition'd).
+func (f *FakeLog) Compact(topic string, partition int32, records [][]byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	key := logKey{topic, partition}
+	if _, ok := f.batches[key]; !ok {
+		return fmt.Errorf("unknown topic-partition %s-%d", topic, partition)
+	}
+
+	fresh := make([]fakeBatch, len(records))
+	for i, data := range records {
+		fresh[i] = fakeBatch{data: data, baseOffset: int64(i), offsetSpan: 1}
+	}
+	f.batches[key] = fresh
+	return nil
+}
+
 func (f *FakeLog) Size(topic string, partition int32) (int64, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()

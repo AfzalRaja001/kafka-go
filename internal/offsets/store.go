@@ -116,17 +116,42 @@ func (s *LogBackedStore) applyLocked(rec commitRecord) {
 	s.latest[key] = committedOffset{offset: rec.Offset, metadata: rec.Metadata}
 }
 
+// Commit holds s.mu for the append as well as the in-memory update, not
+// just the latter - otherwise a Compact running concurrently could snapshot
+// s.latest, start rewriting the log from it, and still have a Commit append
+// to the log being replaced in between, silently losing that commit once
+// the rewrite finishes. Serializing the whole operation is what makes
+// Compact's own snapshot-then-rewrite safe to reason about.
 func (s *LogBackedStore) Commit(group, topic string, partition int32, offset int64, metadata string) error {
 	rec := commitRecord{Group: group, Topic: topic, Partition: partition, Offset: offset, Metadata: metadata}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	if _, err := s.log.Append(topicName, partitionID, encodeCommit(rec), 1); err != nil {
 		return err
 	}
-
-	s.mu.Lock()
 	s.applyLocked(rec)
-	s.mu.Unlock()
 	return nil
+}
+
+// Compact reclaims __consumer_offsets' disk space by rewriting it down to
+// exactly one record per distinct (group, topic, partition) key - the
+// latest committed value, which is already exactly what s.latest holds in
+// memory. Holding s.mu for the whole operation (not just the snapshot) is
+// what keeps this safe against a concurrent Commit: see Commit's own
+// comment for why it now holds the same lock around its append too.
+func (s *LogBackedStore) Compact() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	records := make([][]byte, 0, len(s.latest))
+	for key, c := range s.latest {
+		rec := commitRecord{Group: key.group, Topic: key.topic, Partition: key.partition, Offset: c.offset, Metadata: c.metadata}
+		records = append(records, encodeCommit(rec))
+	}
+
+	return s.log.Compact(topicName, partitionID, records)
 }
 
 func (s *LogBackedStore) Fetch(group, topic string, partition int32) (int64, string, bool) {

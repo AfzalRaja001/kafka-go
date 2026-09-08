@@ -53,6 +53,11 @@ const (
 	// group members is, and each tick does real work (walks every known
 	// topic-partition and every known consumer group).
 	metricsCollectInterval = 15 * time.Second
+
+	// offsetsCompactInterval is slower still - this is disk-space
+	// housekeeping on a low-traffic internal topic, not latency-sensitive
+	// or correctness-critical the way reaping or metrics collection are.
+	offsetsCompactInterval = 5 * time.Minute
 )
 
 func main() {
@@ -81,6 +86,7 @@ func main() {
 	go runReaper(ctx, coord)
 	go runMetricsServer(ctx, recorder)
 	go runMetricsCollector(ctx, metricsCollectInterval, registry, diskLog, offsetStore, recorder)
+	go runOffsetsCompactor(ctx, offsetsCompactInterval, offsetStore)
 
 	log.Printf("kafka-go broker listening on %s", listenAddr)
 	if err := broker.Serve(ctx, listenAddr, registry, brokers, diskLog, offsetStore, coord, recorder); err != nil {
@@ -123,6 +129,28 @@ func runReaper(ctx context.Context, coord *group.Coordinator) {
 			return
 		case now := <-ticker.C:
 			coord.ReapExpiredMembers(now)
+		}
+	}
+}
+
+// runOffsetsCompactor periodically reclaims __consumer_offsets' disk space
+// by rewriting it down to one record per key, until ctx is canceled. A
+// failed compaction is logged, not fatal - offsetStore.latest already holds
+// the correct in-memory answer regardless, so a compaction that fails
+// leaves the broker no less correct, just no smaller on disk until the next
+// tick tries again.
+func runOffsetsCompactor(ctx context.Context, interval time.Duration, offsetStore *offsets.LogBackedStore) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := offsetStore.Compact(); err != nil {
+				log.Printf("offsets compactor: %v", err)
+			}
 		}
 	}
 }

@@ -132,3 +132,58 @@ func TestFakeLog_SizeUnknownPartitionErrors(t *testing.T) {
 		t.Fatal("expected an error for an unknown topic-partition, got nil")
 	}
 }
+
+func TestFakeLog_CompactReplacesRecordsRenumberedFromZero(t *testing.T) {
+	log := NewFakeLog()
+	log.Append("__consumer_offsets", 0, []byte("stale-1"), 1)
+	log.Append("__consumer_offsets", 0, []byte("stale-2"), 1)
+	log.Append("__consumer_offsets", 0, []byte("stale-3"), 1)
+
+	if err := log.Compact("__consumer_offsets", 0, [][]byte{[]byte("kept-a"), []byte("kept-b")}); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	got, err := log.Read("__consumer_offsets", 0, 0, 1024)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	want := []byte("kept-akept-b")
+	if !bytes.Equal(got, want) {
+		t.Fatalf("Read after Compact = %q, want %q", got, want)
+	}
+
+	latest, err := log.LatestOffset("__consumer_offsets", 0)
+	if err != nil {
+		t.Fatalf("LatestOffset: %v", err)
+	}
+	if latest != 2 {
+		t.Fatalf("LatestOffset after Compact = %d, want 2 (renumbered from 0)", latest)
+	}
+}
+
+func TestFakeLog_CompactWithNoRecordsLeavesPartitionEmpty(t *testing.T) {
+	log := NewFakeLog()
+	log.Append("__consumer_offsets", 0, []byte("stale"), 1)
+
+	if err := log.Compact("__consumer_offsets", 0, nil); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	// Empty, not gone: still distinguishable from a partition that was
+	// never created - Read must succeed with zero bytes, not error.
+	got, err := log.Read("__consumer_offsets", 0, 0, 1024)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("Read after compacting to nothing = %q, want empty", got)
+	}
+}
+
+func TestFakeLog_CompactUnknownPartitionErrors(t *testing.T) {
+	log := NewFakeLog()
+
+	if err := log.Compact("never-created", 0, [][]byte{[]byte("x")}); err == nil {
+		t.Fatal("expected an error compacting an unknown topic-partition, got nil")
+	}
+}
