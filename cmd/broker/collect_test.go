@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/AfzalRaja001/kafka-go/internal/group"
 	"github.com/AfzalRaja001/kafka-go/internal/metrics"
@@ -97,5 +98,67 @@ func TestCollectMetrics_ReportsZeroLagWhenCaughtUp(t *testing.T) {
 	body := scrapeMetrics(t, recorder)
 	if !strings.Contains(body, `kafkago_consumer_group_lag{group="my-group",partition="0",topic="orders"} 0`) {
 		t.Errorf("expected lag of 0:\n%s", body)
+	}
+}
+
+func TestApplyRetention_DeletesAcrossEveryKnownPartition(t *testing.T) {
+	registry := protocol.NewTopicRegistry()
+	registry.AddTopic(&protocol.Topic{
+		Name:       "orders",
+		Partitions: []protocol.PartitionMetadata{{ID: 0}, {ID: 1}},
+	})
+
+	log := storage.NewFakeLog()
+	for i := 0; i < 5; i++ {
+		log.Append("orders", 0, []byte("r"), 1)
+		log.Append("orders", 1, []byte("r"), 1)
+	}
+
+	future := time.Now().Add(365 * 24 * time.Hour)
+	applyRetention(registry, log, time.Hour, 0, future)
+
+	for _, partition := range []int32{0, 1} {
+		earliest, err := log.EarliestOffset("orders", partition)
+		if err != nil || earliest == 0 {
+			t.Errorf("partition %d: EarliestOffset = %d, %v, want > 0 after retention", partition, earliest, err)
+		}
+	}
+}
+
+// TestApplyRetention_SkipsPartitionRegistryKnowsAboutButLogDoesNot mirrors
+// collectMetrics' own defensive behavior - one partition the registry knows
+// about but the log has never heard of must not crash the whole sweep,
+// since this runs forever on a ticker.
+func TestApplyRetention_SkipsPartitionRegistryKnowsAboutButLogDoesNot(t *testing.T) {
+	registry := protocol.NewTopicRegistry()
+	registry.AddTopic(&protocol.Topic{
+		Name:       "ghost-topic",
+		Partitions: []protocol.PartitionMetadata{{ID: 0}},
+	})
+
+	// Must not panic or error out - FakeLog.ApplyRetention already reports
+	// "unknown partition" as a no-op, not an error, but applyRetention
+	// itself must tolerate an error here regardless.
+	applyRetention(registry, storage.NewFakeLog(), time.Hour, 0, time.Now())
+}
+
+func TestApplyRetention_ZeroValuesDisableBothChecks(t *testing.T) {
+	registry := protocol.NewTopicRegistry()
+	registry.AddTopic(&protocol.Topic{
+		Name:       "orders",
+		Partitions: []protocol.PartitionMetadata{{ID: 0}},
+	})
+
+	log := storage.NewFakeLog()
+	for i := 0; i < 5; i++ {
+		log.Append("orders", 0, []byte("r"), 1)
+	}
+
+	future := time.Now().Add(365 * 24 * time.Hour)
+	applyRetention(registry, log, 0, 0, future)
+
+	earliest, err := log.EarliestOffset("orders", 0)
+	if err != nil || earliest != 0 {
+		t.Errorf("EarliestOffset = %d, %v, want 0 (both retention checks disabled)", earliest, err)
 	}
 }

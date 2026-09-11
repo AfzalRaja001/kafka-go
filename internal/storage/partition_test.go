@@ -5,6 +5,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 )
 
 func openTestPartition(t *testing.T, segmentMaxBytes int64, indexEvery int32) *Partition {
@@ -203,6 +204,180 @@ func TestPartition_CompactSurvivesReopen(t *testing.T) {
 	data, _, err := reopened.Read(0)
 	if err != nil || string(data) != "kept" {
 		t.Fatalf("Read(0) after reopen = (%q, %v), want (\"kept\", nil)", data, err)
+	}
+}
+
+func TestPartition_EarliestOffsetIsZeroBeforeAnyRetention(t *testing.T) {
+	p := openTestPartition(t, 1<<20, 5)
+	defer p.Close()
+
+	for i := 0; i < 5; i++ {
+		p.Append([]byte(fmt.Sprintf("record-%d", i)), 1, 1000)
+	}
+
+	if got := p.EarliestOffset(); got != 0 {
+		t.Errorf("EarliestOffset = %d, want 0 (nothing ever deleted)", got)
+	}
+}
+
+// backdateSegment rewrites a segment's .log file mtime, simulating "this
+// segment was last written to at oldTime" without needing a real sleep.
+func backdateSegment(t *testing.T, dir string, base int64, oldTime time.Time) {
+	t.Helper()
+	path := segmentFileBase(dir, base) + ".log"
+	if err := os.Chtimes(path, oldTime, oldTime); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+}
+
+func TestPartition_ApplyRetention_DeletesExpiredSegmentsByTime(t *testing.T) {
+	p := openTestPartition(t, 40, 1000) // tiny segmentMaxBytes forces rolling
+	defer p.Close()
+
+	for i := 0; i < 20; i++ {
+		p.Append([]byte(fmt.Sprintf("record-%d", i)), 1, 1000)
+	}
+	if len(p.segments) < 3 {
+		t.Fatalf("test setup: expected at least 3 segments, got %d", len(p.segments))
+	}
+
+	now := time.Now()
+	// Backdate every segment except the active (last) one to 10 days old.
+	for _, sg := range p.segments[:len(p.segments)-1] {
+		backdateSegment(t, p.dir, sg.baseOffset, now.Add(-10*24*time.Hour))
+	}
+
+	if err := p.ApplyRetention(7*24*time.Hour, 0, now); err != nil {
+		t.Fatalf("ApplyRetention: %v", err)
+	}
+
+	if len(p.segments) != 1 {
+		t.Fatalf("segments remaining = %d, want 1 (only the active segment)", len(p.segments))
+	}
+	if got, want := p.EarliestOffset(), p.segments[0].baseOffset; got != want {
+		t.Errorf("EarliestOffset = %d, want %d (the active segment's own base offset)", got, want)
+	}
+	if p.EarliestOffset() == 0 {
+		t.Error("EarliestOffset = 0, want it to have advanced past the deleted segments")
+	}
+}
+
+func TestPartition_ApplyRetention_NeverDeletesTheActiveSegment(t *testing.T) {
+	p := openTestPartition(t, 1<<20, 5) // large segmentMaxBytes - single (active) segment
+	defer p.Close()
+
+	p.Append([]byte("record"), 1, 1000)
+
+	now := time.Now()
+	backdateSegment(t, p.dir, 0, now.Add(-365*24*time.Hour))
+
+	if err := p.ApplyRetention(time.Hour, 0, now); err != nil {
+		t.Fatalf("ApplyRetention: %v", err)
+	}
+
+	if len(p.segments) != 1 {
+		t.Fatalf("segments remaining = %d, want 1 (the active segment survives no matter how old)", len(p.segments))
+	}
+	if got := p.EarliestOffset(); got != 0 {
+		t.Errorf("EarliestOffset = %d, want 0 (nothing was actually deletable)", got)
+	}
+}
+
+func TestPartition_ApplyRetention_ZeroMaxAgeDisablesTimeCheck(t *testing.T) {
+	p := openTestPartition(t, 40, 1000)
+	defer p.Close()
+
+	for i := 0; i < 20; i++ {
+		p.Append([]byte(fmt.Sprintf("record-%d", i)), 1, 1000)
+	}
+	now := time.Now()
+	for _, sg := range p.segments[:len(p.segments)-1] {
+		backdateSegment(t, p.dir, sg.baseOffset, now.Add(-365*24*time.Hour))
+	}
+
+	if err := p.ApplyRetention(0, 0, now); err != nil {
+		t.Fatalf("ApplyRetention: %v", err)
+	}
+
+	if len(p.segments) < 3 {
+		t.Errorf("segments remaining = %d, want unchanged (maxAge=0 disables the time check)", len(p.segments))
+	}
+}
+
+func TestPartition_ApplyRetention_DeletesOldestSegmentsBySize(t *testing.T) {
+	p := openTestPartition(t, 40, 1000)
+	defer p.Close()
+
+	for i := 0; i < 20; i++ {
+		p.Append([]byte(fmt.Sprintf("record-%d", i)), 1, 1000)
+	}
+	totalBefore := p.Size()
+	if len(p.segments) < 3 {
+		t.Fatalf("test setup: expected at least 3 segments, got %d", len(p.segments))
+	}
+
+	// Budget for roughly half the current size - enough to force deleting
+	// the oldest segment(s) while keeping the active one untouched.
+	budget := totalBefore / 2
+
+	if err := p.ApplyRetention(0, budget, time.Now()); err != nil {
+		t.Fatalf("ApplyRetention: %v", err)
+	}
+
+	if p.Size() > totalBefore {
+		t.Errorf("Size after ApplyRetention = %d, want <= starting size %d", p.Size(), totalBefore)
+	}
+	if p.EarliestOffset() == 0 {
+		t.Error("EarliestOffset still 0, want at least one oldest segment deleted by the size budget")
+	}
+	// The active segment must always survive, regardless of budget.
+	if len(p.segments) < 1 {
+		t.Fatal("no segments remain - the active segment must never be deleted")
+	}
+}
+
+// TestPartition_ApplyRetention_ActuallyReclaimsDiskSpace mirrors the
+// equivalent compaction test - the whole point is that deleted segment
+// files are gone from disk, not just unreferenced in memory.
+func TestPartition_ApplyRetention_ActuallyReclaimsDiskSpace(t *testing.T) {
+	p := openTestPartition(t, 40, 1000)
+	defer p.Close()
+
+	for i := 0; i < 20; i++ {
+		p.Append([]byte(fmt.Sprintf("record-%d", i)), 1, 1000)
+	}
+	var deletableBases []int64
+	now := time.Now()
+	for _, sg := range p.segments[:len(p.segments)-1] {
+		deletableBases = append(deletableBases, sg.baseOffset)
+		backdateSegment(t, p.dir, sg.baseOffset, now.Add(-10*24*time.Hour))
+	}
+
+	if err := p.ApplyRetention(7*24*time.Hour, 0, now); err != nil {
+		t.Fatalf("ApplyRetention: %v", err)
+	}
+
+	for _, base := range deletableBases {
+		logPath := segmentFileBase(p.dir, base) + ".log"
+		if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+			t.Errorf("deleted segment file %s still exists on disk (err=%v)", logPath, err)
+		}
+	}
+}
+
+func TestPartition_ApplyRetention_NoOpWhenNothingIsEligible(t *testing.T) {
+	p := openTestPartition(t, 1<<20, 5)
+	defer p.Close()
+
+	for i := 0; i < 5; i++ {
+		p.Append([]byte(fmt.Sprintf("record-%d", i)), 1, 1000)
+	}
+
+	if err := p.ApplyRetention(7*24*time.Hour, 1<<30, time.Now()); err != nil {
+		t.Fatalf("ApplyRetention: %v", err)
+	}
+	if got := p.EarliestOffset(); got != 0 {
+		t.Errorf("EarliestOffset = %d, want 0 (nothing eligible for deletion)", got)
 	}
 }
 

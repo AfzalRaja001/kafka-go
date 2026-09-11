@@ -1,5 +1,7 @@
 package storage
 
+import "time"
+
 // Log is the boundary between protocol handlers and the storage engine.
 // Handlers depend only on this interface, never on a concrete implementation.
 //
@@ -42,4 +44,12 @@ type Log interface {
 	// (see internal/offsets) and nothing else - do not call this on a
 	// topic-partition a real client might Fetch.
 	Compact(topic string, partition int32, records [][]byte) error
+
+	// ApplyRetention deletes whole old segments - oldest first, never the
+	// active one - once they're older than maxAge or the partition exceeds
+	// maxBytes. Either can be 0 to disable that check. Unlike Compact, this
+	// never renumbers anything: EarliestOffset simply advances past whatever
+	// got deleted, leaving a real gap - the normal, expected shape of a
+	// Kafka log under retention, not something to work around.
+	ApplyRetention(topic string, partition int32, maxAge time.Duration, maxBytes int64, now time.Time) error
 }

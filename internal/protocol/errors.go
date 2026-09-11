@@ -5,6 +5,7 @@ package protocol
 const (
 	ErrUnknownServerError        int16 = -1
 	ErrNone                      int16 = 0
+	ErrOffsetOutOfRange          int16 = 1
 	ErrUnknownTopicOrPartition   int16 = 3
 	ErrCorruptMessage            int16 = 2
 	ErrUnsupportedVersion        int16 = 35
