@@ -82,9 +82,11 @@ func main() {
 	// starts with none, matching real Kafka.
 	registry := protocol.NewTopicRegistry()
 
-	brokers := []protocol.Broker{
-		{NodeID: 1, Host: "localhost", Port: 9092},
+	self, err := brokerConfigFromEnv(os.Getenv)
+	if err != nil {
+		log.Fatalf("broker config: %v", err)
 	}
+	brokers := []protocol.Broker{self}
 
 	offsetStore, err := offsets.NewLogBackedStore(diskLog)
 	if err != nil {
@@ -102,7 +104,7 @@ func main() {
 	go runOffsetsCompactor(ctx, offsetsCompactInterval, offsetStore)
 	go runRetention(ctx, retentionCheckInterval, registry, diskLog, retentionMaxAge, retentionMaxBytes)
 
-	log.Printf("kafka-go broker listening on %s", listenAddr)
+	log.Printf("kafka-go broker listening on %s, advertising %s:%d", listenAddr, self.Host, self.Port)
 	if err := broker.Serve(ctx, listenAddr, registry, brokers, diskLog, offsetStore, coord, recorder); err != nil {
 		log.Fatalf("broker: %v", err)
 	}

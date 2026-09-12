@@ -40,13 +40,14 @@ they are useful framing when describing the project.
 | 2 | Storage engine: segments, indexes, partitions, recovery | Done, **1 gap** (no fsync policy) |
 | 3 | Produce, Fetch, ListOffsets, CreateTopics, DeleteTopics | Done, **1 gap** (`acks` ignored) |
 | 4 | Consumer groups + `__consumer_offsets` | Done |
-| 5 | Production polish | **Mostly done - 3 items left** |
+| 5 | Production polish | **Mostly done - 1 item left** |
 | 7 | Deploy | Partially done, **blocks v1.0** |
 | 6 | Replication (stretch) | Not started, gated |
 
-26 PRs merged, one open (#28, the `Partition.ReadBatch` fetch performance
-fix). All of `go build ./... && go vet ./... && go test -race ./...` passes,
-and CI (`.github/workflows/ci.yml`) runs exactly that on every push and PR.
+29 PRs merged, none open (this document's own gap 5 fix - the configurable
+advertised broker address - is the next one to open). All of
+`go build ./... && go vet ./... && go test -race ./...` passes, and CI
+(`.github/workflows/ci.yml`) runs exactly that on every push and PR.
 
 ---
 
@@ -100,8 +101,8 @@ plus offset span) so a restart can rebuild `nextOffset` from the segment file
 alone, with no separate bookkeeping file.
 
 The `Log` interface was deliberately frozen and has been extended exactly
-four times, each with a documented reason: `recordCount` on `Append`,
-`CreatePartition`/`DeletePartition`, `Size`, and `Compact`.
+five times, each with a documented reason: `recordCount` on `Append`,
+`CreatePartition`/`DeletePartition`, `Size`, `Compact`, and `ApplyRetention`.
 
 Record batches are stored **verbatim**. Only the 61-byte batch header is
 parsed, to rewrite `baseOffset` and recompute the CRC-32C. This is the single
@@ -150,13 +151,19 @@ Offsets went through the planned two-step: an in-memory store first, then
 - **Log compaction**, but internal-only: `__consumer_offsets` now gets real
   space reclamation via `Log.Compact`. This is **not** general
   `cleanup.policy=compact` for client topics - see the gap list below.
+- **Retention** (`cleanup.policy=delete`): a background ticker
+  (`runRetention`) deletes whole segments older than `retention.ms` or
+  beyond `retention.bytes`, oldest first, never the active segment.
+  `EarliestOffset` now reports the real first surviving offset instead of a
+  hardcoded `0`, and `Fetch` returns `OFFSET_OUT_OF_RANGE` (not an infinite
+  long-poll) for an offset retention has already deleted past. This closed
+  what used to be gap 3 below.
 
 Plus one performance fix that came out of the benchmark rather than the plan
-(PR #28, open at the time of writing): `DiskLog.Read` was restarting its
-sparse-index lookup and forward scan for every single blob, making a full
-fetch O(n * indexEvery) instead of O(n). `Partition.ReadBatch` does one
-lookup and scans through, which took a real ~1MB fetch of small records from
-~5.68s down to ~200ms.
+(PR #28): `DiskLog.Read` was restarting its sparse-index lookup and forward
+scan for every single blob, making a full fetch O(n * indexEvery) instead of
+O(n). `Partition.ReadBatch` does one lookup and scans through, which took a
+real ~1MB fetch of small records from ~5.68s down to ~200ms.
 
 ---
 
@@ -191,19 +198,12 @@ gets a response it is not expecting on the connection.
 way for a handler to signal "no reply" back up to the connection loop.
 Small, but touches the dispatch contract, so worth doing deliberately.
 
-### 3. Retention is not implemented (Phase 5)
+### 3. Retention - CLOSED (Phase 5)
 
-Nothing ever deletes old segments. `DiskLog.EarliestOffset` is hardcoded to
-return `0`, with a comment saying as much. Compaction (shipped) and retention
-(not shipped) are two different real Kafka policies: compaction keeps the
-latest value per key, retention drops records past an age or size limit
-regardless of key.
-
-**Work:** a background goroutine deleting whole segments older than
-`retention.ms` or beyond `retention.bytes`, and making `EarliestOffset`
-report the real first surviving offset. The compaction PR already built the
-"close handles, delete segment files, with Windows retry" machinery this
-needs.
+Shipped (PR #30, 2026-09-11): a background ticker deletes whole segments
+older than `retention.ms` or beyond `retention.bytes`, and `EarliestOffset`
+reports the real first surviving offset. See the 2026-09-11 decisions entry
+for the full writeup, including the `ErrOffsetOutOfRange` fix it required.
 
 ### 4. No general per-topic compaction (Phase 5, deliberate)
 
@@ -218,13 +218,17 @@ This was scoped out on purpose (2026-09-07 decisions entry). Leaving it out
 is defensible; it belongs in the README's "what I'd do differently" section
 rather than in the build queue.
 
-### 5. Broker advertises a hardcoded `localhost` (Phase 7)
+### 5. Broker advertises a hardcoded `localhost` - CLOSED (Phase 7)
 
-`cmd/broker/main.go` hardcodes `{NodeID: 1, Host: "localhost", Port: 9092}`
-in its `Metadata` response. This is precisely the `advertised.listeners` trap
-the original plan warned about: it works locally and breaks the moment the
-broker runs anywhere a client is not also running. **This blocks any real
-deployment** and therefore blocks `v1.0-singlenode`.
+Shipped (2026-09-12): `cmd/broker/main.go` used to hardcode
+`{NodeID: 1, Host: "localhost", Port: 9092}` into its `Metadata` response -
+precisely the `advertised.listeners` trap the original plan warned about, and
+the thing blocking `v1.0-singlenode`. `brokerConfigFromEnv`
+(`cmd/broker/config.go`) now reads `KAFKA_NODE_ID`, `KAFKA_ADVERTISED_HOST`,
+and `KAFKA_ADVERTISED_PORT`, each defaulting to the old hardcoded value. See
+the 2026-09-12 decisions entry for the full writeup. `listenAddr` (`:9092`)
+already bound every interface, so binding `0.0.0.0` needed no change - only
+the advertised side was ever the gap.
 
 ### 6. No config file (Phase 5)
 
@@ -262,7 +266,9 @@ before any distributed work starts.
 
 ### Step 1 - close the single-node gaps (~10-14 hrs)
 
-Priority order within the step:
+Priority order within the step (retention shipped ahead of this order as
+PR #30, and the advertised-host fix from Step 2 below also shipped early -
+both are struck from here, not re-listed):
 
 1. **README + artifacts** (~4 hrs, Track A or either). Architecture diagram,
    Grafana screenshot, 60-second demo GIF of official Kafka tooling against
@@ -271,9 +277,8 @@ Priority order within the step:
    compaction, no transactions, single-version APIs). Highest value per hour
    in the repo right now.
 2. **fsync policy** (~2-3 hrs, Track B). Gap 1.
-3. **Retention** (~4-5 hrs, Track B). Gap 3.
-4. **`acks=0`** (~2 hrs, Track A). Gap 2.
-5. **Config file** (~2-3 hrs, either) - optional, but do it *before* 2/3/5 if
+3. **`acks=0`** (~2 hrs, Track A). Gap 2.
+4. **Config file** (~2-3 hrs, either) - optional, but do it *before* 2/3 if
    doing it at all, so those land as config instead of new constants.
 
 **Exit criteria:** a stranger can clone the repo, run one command, produce
@@ -282,8 +287,10 @@ from the README alone, without asking a question.
 
 ### Step 2 - deploy, then tag `v1.0-singlenode` (~6-8 hrs)
 
-1. Fix gap 5: make the advertised host/port configurable (env var or config
-   file), bind `0.0.0.0`, advertise the real reachable address.
+1. ~~Fix gap 5: make the advertised host/port configurable~~ - done
+   (2026-09-12, shipped early rather than waiting on Step 1). `listenAddr`
+   already bound `0.0.0.0`; only the advertised address needed to become
+   configurable.
 2. Stand it up on a VPS. Oracle Cloud Always Free ARM (2 OCPU / 12GB since
    June 2026) is the best free option; Hetzner CX22 at ~EUR 4/mo is the
    zero-hassle alternative. Fly.io's free tier is gone for new accounts, and

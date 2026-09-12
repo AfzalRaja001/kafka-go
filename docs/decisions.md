@@ -681,3 +681,36 @@ segment rolls. By the time of the check, retention had already swept everything 
 3 files totaling under 150 bytes on disk - confirmed via `ListOffsets(-2)` reporting a real, non-zero
 `EarliestOffset` (752, one before the log's actual end), a `Fetch` at offset 0 correctly returning
 `error_code=1` (`OFFSET_OUT_OF_RANGE`), and a `Fetch` at the real earliest offset still succeeding normally.
+
+## 2026-09-12 - Configurable advertised broker address (Phase 7 gap 5)
+
+`cmd/broker/main.go` hardcoded `{NodeID: 1, Host: "localhost", Port: 9092}` into every `Metadata` and
+`FindCoordinator` response, regardless of where the broker actually ran or what address a client would need to
+reach it at. Real Kafka draws exactly this line between `listeners` (what the socket binds to) and
+`advertised.listeners` (what clients are told to reconnect to) precisely because the two are not always the
+same address - a container's internal bind address is rarely the address a client outside that container can
+reach. `listenAddr` (`":9092"`) already binds every interface, so the only real gap was the advertised side
+being a constant instead of configuration.
+
+Added `brokerConfigFromEnv` (`cmd/broker/config.go`), a pure function reading three optional environment
+variables - `KAFKA_NODE_ID`, `KAFKA_ADVERTISED_HOST`, `KAFKA_ADVERTISED_PORT` - each falling back to the exact
+value that used to be hardcoded, so an unconfigured broker behaves identically to before. It takes a
+`func(string) string` rather than calling `os.Getenv` directly, the same dependency-injection shape
+`collectMetrics`/`applyRetention` already use for testability - tests pass a fake backed by a plain map,
+`main` passes `os.Getenv`.
+
+Chose env vars over a config file: a config file was explicitly deferred earlier this phase, and
+`docs/plan.md`'s own gap description offered "env var or config file" as equally acceptable - env vars are
+also what every containerized deployment target (Docker, a VPS's systemd unit, a Kubernetes manifest) already
+sets without any extra file to mount.
+
+A set-but-invalid value (`KAFKA_NODE_ID=abc`, `KAFKA_ADVERTISED_PORT=nope`) is a startup error
+(`log.Fatalf`), not a silent fallback to the default - matching how `offsets.NewLogBackedStore`'s own error is
+already handled in `main`. Silently defaulting on a parse failure would let a real typo in a deployment's
+environment ship a broker quietly advertising `localhost` again, recreating the exact bug this change fixes
+one layer further away, at the point where it's hardest to notice.
+
+Verified against a real running broker: started with `KAFKA_ADVERTISED_HOST=203.0.113.10` and
+`KAFKA_ADVERTISED_PORT=9999` set, still bound to `:9092` locally, then queried it with franz-go's
+`kadm.ListBrokers` - the response reported `Host=203.0.113.10 Port=9999`, confirming the bind address and the
+advertised address are now genuinely independent.
