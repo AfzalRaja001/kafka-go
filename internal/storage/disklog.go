@@ -137,35 +137,18 @@ func (d *DiskLog) DeletePartition(topic string, partition int32) error {
 	return removeAllWithRetry(os.RemoveAll, partDir, 5, 20*time.Millisecond)
 }
 
-// Read returns up to maxBytes of records starting at offset, by repeatedly
-// reading one batch at a time and concatenating until the byte budget is
-// used or reads stop succeeding. Partition.Read doesn't currently
-// distinguish "reached the end of the log" from a genuine I/O error - both
-// simply stop the loop here and return whatever was collected so far. That
-// distinction matters for Fetch's long-polling logic (Phase 3) and isn't
-// needed yet.
-//
-// The loop advances by the next-offset each batch reports rather than by 1,
-// since one batch can span many offsets.
+// Read returns up to maxBytes of records starting at offset. Delegates
+// straight to Partition.ReadBatch, which does this in one pass - this used
+// to be a loop here calling Partition.Read once per blob, but that repeated
+// a sparse-index lookup and rescan for every single blob, making a full
+// read O(n * indexEvery) instead of O(n). See ReadBatch's own doc comment
+// and docs/decisions.md for the fix.
 func (d *DiskLog) Read(topic string, partition int32, offset int64, maxBytes int32) ([]byte, error) {
 	p, ok := d.getPartition(topic, partition)
 	if !ok {
 		return nil, fmt.Errorf("unknown topic-partition %s-%d", topic, partition)
 	}
-
-	var out []byte
-	for {
-		data, next, err := p.Read(offset)
-		if err != nil {
-			break
-		}
-		if len(out)+len(data) > int(maxBytes) {
-			break
-		}
-		out = append(out, data...)
-		offset = next
-	}
-	return out, nil
+	return p.ReadBatch(offset, maxBytes)
 }
 
 // EarliestOffset delegates to Partition.EarliestOffset - 0 until retention

@@ -332,18 +332,26 @@ func removeSegmentGroupFiles(dir string, base int64) error {
 	return nil
 }
 
-// findSegment returns the segment whose base offset is the largest one not
-// exceeding offset - the same "binary search to the nearest lower entry"
-// idea as Index.Lookup, applied one level up, to segments instead of
-// records within one segment.
-func (p *Partition) findSegment(offset int64) *segmentGroup {
+// findSegmentIndex returns the index into p.segments of the segment whose
+// base offset is the largest one not exceeding offset - the same "binary
+// search to the nearest lower entry" idea as Index.Lookup, applied one
+// level up, to segments instead of records within one segment. -1 means no
+// segment starts at or before offset.
+func (p *Partition) findSegmentIndex(offset int64) int {
 	i := sort.Search(len(p.segments), func(i int) bool {
 		return p.segments[i].baseOffset > offset
 	})
-	if i == 0 {
+	return i - 1
+}
+
+// findSegment is findSegmentIndex, dereferenced - kept as its own method
+// since most callers want the segment itself, not its position.
+func (p *Partition) findSegment(offset int64) *segmentGroup {
+	i := p.findSegmentIndex(offset)
+	if i < 0 {
 		return nil
 	}
-	return p.segments[i-1]
+	return p.segments[i]
 }
 
 // Read returns the batch containing offset, plus the offset immediately
@@ -374,6 +382,79 @@ func (p *Partition) EarliestOffset() int64 {
 	defer p.mu.RUnlock()
 
 	return p.segments[0].baseOffset
+}
+
+// ReadBatch returns up to maxBytes of concatenated blob bytes starting at
+// offset - what DiskLog.Read actually needs, and the fix for a real
+// performance bug: DiskLog.Read used to get this by calling Read (above)
+// once per blob, and every one of those calls repeated the same sparse-
+// index lookup and re-scanned forward from that index window's start,
+// making a full read O(n * indexEvery) instead of O(n). ReadBatch does the
+// index lookup exactly once, then keeps scanning forward from wherever it
+// left off - across segment boundaries too, if maxBytes hasn't been hit
+// once the current segment runs out.
+//
+// Like Read, this never surfaces "offset out of range" or "nothing here
+// yet" as an error - both simply mean an empty result. That distinction
+// matters for Fetch's long-polling logic: nothing new to read is not a
+// failure.
+func (p *Partition) ReadBatch(offset int64, maxBytes int32) ([]byte, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	segIdx := p.findSegmentIndex(offset)
+	if segIdx < 0 {
+		return nil, nil
+	}
+	sg := p.segments[segIdx]
+
+	// One index lookup, only for the segment actually containing offset -
+	// every segment reached afterward by rolling off the end starts its own
+	// scan fresh from position 0, since a fresh segment has no need for an
+	// index lookup to find its own first blob.
+	relTarget := int32(offset - sg.baseOffset)
+	var pos int64
+	var curOffset int32
+	if entryOffset, entryPos, found := sg.idx.Lookup(relTarget); found {
+		curOffset = entryOffset
+		pos = int64(entryPos)
+	}
+
+	var out []byte
+	started := false
+	for {
+		data, span, err := sg.seg.ReadAt(pos)
+		if err != nil {
+			// Ran out of blobs in this segment - normal exhaustion (real
+			// I/O errors are indistinguishable here, matching Read's own
+			// documented simplification). Move to the next segment, if any.
+			segIdx++
+			if segIdx >= len(p.segments) {
+				break
+			}
+			sg = p.segments[segIdx]
+			pos, curOffset = 0, 0
+			continue
+		}
+
+		if !started {
+			if relTarget >= curOffset+span {
+				pos += recordHeaderSize + int64(len(data))
+				curOffset += span
+				continue
+			}
+			started = true
+		}
+
+		if len(out)+len(data) > int(maxBytes) {
+			break
+		}
+		out = append(out, data...)
+		pos += recordHeaderSize + int64(len(data))
+		curOffset += span
+	}
+
+	return out, nil
 }
 
 // LogEndOffset is deliberately lock-free: nextOffset doesn't need to be
