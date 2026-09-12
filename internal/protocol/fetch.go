@@ -123,7 +123,22 @@ func HandleFetch(correlationID int32, requestBody []byte, log storage.Log) ([]by
 }
 
 func fetchOne(ctx context.Context, log storage.Log, topic string, partition int32, fetchOffset int64, minBytes, maxBytes int32) (data []byte, highWatermark int64, errorCode int16) {
-	data, err := waitForData(ctx, log, topic, partition, fetchOffset, minBytes, maxBytes)
+	earliest, err := log.EarliestOffset(topic, partition)
+	if err != nil {
+		return nil, 0, ErrUnknownTopicOrPartition
+	}
+	// A fetchOffset below EarliestOffset means retention already deleted
+	// it - long-polling for data that can never arrive would just waste the
+	// full timeout, the same reasoning waitForData already applies to an
+	// unknown topic-partition. Without this check, Log.Read/ReadBatch's
+	// "nothing here" contract makes a deleted offset indistinguishable from
+	// "caught up, nothing new yet," which would leave a client stalled
+	// forever instead of getting an actionable error to reseek from.
+	if fetchOffset < earliest {
+		return nil, 0, ErrOffsetOutOfRange
+	}
+
+	data, err = waitForData(ctx, log, topic, partition, fetchOffset, minBytes, maxBytes)
 	if err != nil {
 		return nil, 0, ErrUnknownTopicOrPartition
 	}

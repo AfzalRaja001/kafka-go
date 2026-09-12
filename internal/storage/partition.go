@@ -251,6 +251,73 @@ func (p *Partition) Compact(records [][]byte, timestamp int64) error {
 	return nil
 }
 
+// ApplyRetention deletes whole rolled segments from the front of this
+// partition - oldest first - when either maxAge or maxBytes says they're no
+// longer needed. Either can be 0 to disable that check entirely, matching
+// real Kafka's own retention.ms=-1/retention.bytes=-1 "unlimited" convention.
+// The active (last) segment is never a candidate - it's still being written
+// to, the same protection Compact gives it.
+//
+// Unlike Compact, this never renumbers anything: deleting old segments just
+// moves EarliestOffset forward, leaving a real gap before it. That's normal,
+// expected Kafka behavior (a Fetch below EarliestOffset should error, not
+// silently return nothing - see ErrOffsetOutOfRange in internal/protocol),
+// not something this method needs to work around.
+//
+// Segments are chronologically ordered by construction (append-only), so a
+// linear scan from the front that stops at the first surviving segment is
+// correct and sufficient: age only decreases going forward, and the running
+// total only shrinks as segments are removed, so nothing later could still
+// need deleting once the current segment doesn't.
+func (p *Partition) ApplyRetention(maxAge time.Duration, maxBytes int64, now time.Time) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	var totalSize int64
+	for _, sg := range p.segments {
+		totalSize += sg.seg.size
+	}
+
+	survivorsFrom := 0
+	for survivorsFrom < len(p.segments)-1 { // never consider the active segment
+		sg := p.segments[survivorsFrom]
+
+		expiredByAge := false
+		if maxAge > 0 {
+			mtime, err := sg.seg.ModTime()
+			if err != nil {
+				return err
+			}
+			expiredByAge = now.Sub(mtime) > maxAge
+		}
+		overBudget := maxBytes > 0 && totalSize > maxBytes
+
+		if !expiredByAge && !overBudget {
+			break
+		}
+
+		totalSize -= sg.seg.size
+		if err := sg.seg.Close(); err != nil {
+			return err
+		}
+		if err := sg.idx.Close(); err != nil {
+			return err
+		}
+		if err := sg.timeindex.Close(); err != nil {
+			return err
+		}
+		if err := removeSegmentGroupFiles(p.dir, sg.baseOffset); err != nil {
+			return err
+		}
+		survivorsFrom++
+	}
+
+	if survivorsFrom > 0 {
+		p.segments = p.segments[survivorsFrom:]
+	}
+	return nil
+}
+
 // removeSegmentGroupFiles deletes one segment's three files. Windows can
 // briefly hold a file handle open past Close() returning, the same reason
 // DiskLog.DeletePartition retries os.RemoveAll on the whole partition
@@ -305,6 +372,16 @@ func (p *Partition) Read(offset int64) (data []byte, nextOffset int64, err error
 		return nil, 0, err
 	}
 	return data, sg.baseOffset + int64(nextRel), nil
+}
+
+// EarliestOffset returns the oldest offset still present in this partition
+// - 0 until retention has ever deleted anything, and segments[0]'s own base
+// offset afterward, since that's always whatever's currently oldest.
+func (p *Partition) EarliestOffset() int64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	return p.segments[0].baseOffset
 }
 
 // ReadBatch returns up to maxBytes of concatenated blob bytes starting at

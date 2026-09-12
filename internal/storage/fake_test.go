@@ -2,7 +2,9 @@ package storage
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
+	"time"
 )
 
 // Compile-time check: if FakeLog ever stops satisfying Log, this line fails
@@ -185,5 +187,79 @@ func TestFakeLog_CompactUnknownPartitionErrors(t *testing.T) {
 
 	if err := log.Compact("never-created", 0, [][]byte{[]byte("x")}); err == nil {
 		t.Fatal("expected an error compacting an unknown topic-partition, got nil")
+	}
+}
+
+func TestFakeLog_ApplyRetention_DeletesExpiredEntriesByTime(t *testing.T) {
+	log := NewFakeLog()
+	for i := 0; i < 5; i++ {
+		log.Append("orders", 0, []byte(fmt.Sprintf("record-%d", i)), 1)
+	}
+
+	now := time.Now().Add(8 * 24 * time.Hour) // simulate 8 days passing
+	if err := log.ApplyRetention("orders", 0, 7*24*time.Hour, 0, now); err != nil {
+		t.Fatalf("ApplyRetention: %v", err)
+	}
+
+	earliest, err := log.EarliestOffset("orders", 0)
+	if err != nil {
+		t.Fatalf("EarliestOffset: %v", err)
+	}
+	if earliest != 4 {
+		t.Errorf("EarliestOffset = %d, want 4 (everything but the newest entry expired)", earliest)
+	}
+
+	// The newest entry always survives, mirroring the active segment.
+	got, err := log.Read("orders", 0, 4, 1024)
+	if err != nil || string(got) != "record-4" {
+		t.Errorf("Read(4) = %q, %v, want \"record-4\", nil", got, err)
+	}
+}
+
+func TestFakeLog_ApplyRetention_NeverDeletesTheNewestEntry(t *testing.T) {
+	log := NewFakeLog()
+	log.Append("orders", 0, []byte("only"), 1)
+
+	now := time.Now().Add(365 * 24 * time.Hour)
+	if err := log.ApplyRetention("orders", 0, time.Hour, 0, now); err != nil {
+		t.Fatalf("ApplyRetention: %v", err)
+	}
+
+	earliest, err := log.EarliestOffset("orders", 0)
+	if err != nil || earliest != 0 {
+		t.Errorf("EarliestOffset = %d, %v, want 0, nil (the only entry survives)", earliest, err)
+	}
+}
+
+func TestFakeLog_ApplyRetention_ZeroMaxAgeDisablesTimeCheck(t *testing.T) {
+	log := NewFakeLog()
+	for i := 0; i < 5; i++ {
+		log.Append("orders", 0, []byte(fmt.Sprintf("record-%d", i)), 1)
+	}
+
+	now := time.Now().Add(365 * 24 * time.Hour)
+	if err := log.ApplyRetention("orders", 0, 0, 0, now); err != nil {
+		t.Fatalf("ApplyRetention: %v", err)
+	}
+
+	earliest, err := log.EarliestOffset("orders", 0)
+	if err != nil || earliest != 0 {
+		t.Errorf("EarliestOffset = %d, %v, want 0, nil (maxAge=0 disables the time check)", earliest, err)
+	}
+}
+
+func TestFakeLog_ApplyRetention_UnknownPartitionIsNotAnError(t *testing.T) {
+	log := NewFakeLog()
+
+	if err := log.ApplyRetention("never-created", 0, time.Hour, 0, time.Now()); err != nil {
+		t.Errorf("ApplyRetention on unknown topic-partition = %v, want nil", err)
+	}
+}
+
+func TestFakeLog_EarliestOffsetUnknownPartitionErrors(t *testing.T) {
+	log := NewFakeLog()
+
+	if _, err := log.EarliestOffset("missing", 0); err == nil {
+		t.Fatal("expected an error for an unknown topic-partition, got nil")
 	}
 }

@@ -3,6 +3,7 @@ package storage
 import (
 	"fmt"
 	"sync"
+	"time"
 )
 
 // FakeLog is an in-memory Log used to test protocol handlers without a real
@@ -21,6 +22,10 @@ type fakeBatch struct {
 	data       []byte
 	baseOffset int64
 	offsetSpan int64
+
+	// appendedAt lets ApplyRetention simulate age without a real segment
+	// file's mtime to read - set once, at Append time, never touched again.
+	appendedAt time.Time
 }
 
 type logKey struct {
@@ -48,6 +53,7 @@ func (f *FakeLog) Append(topic string, partition int32, batch []byte, recordCoun
 		data:       batch,
 		baseOffset: baseOffset,
 		offsetSpan: int64(recordCount),
+		appendedAt: time.Now(),
 	})
 	return baseOffset, nil
 }
@@ -92,14 +98,23 @@ func (f *FakeLog) Read(topic string, partition int32, offset int64, maxBytes int
 	return out, nil
 }
 
+// EarliestOffset returns the oldest surviving entry's base offset - 0 until
+// ApplyRetention has ever deleted anything, matching DiskLog/Partition's own
+// EarliestOffset contract. An existing but genuinely empty topic-partition
+// (CreatePartition'd, never Appended to) also reports 0, its natural
+// starting offset.
 func (f *FakeLog) EarliestOffset(topic string, partition int32) (int64, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 
-	if _, ok := f.batches[logKey{topic, partition}]; !ok {
+	entries, ok := f.batches[logKey{topic, partition}]
+	if !ok {
 		return 0, fmt.Errorf("unknown topic-partition %s-%d", topic, partition)
 	}
-	return 0, nil
+	if len(entries) == 0 {
+		return 0, nil
+	}
+	return entries[0].baseOffset, nil
 }
 
 func (f *FakeLog) LatestOffset(topic string, partition int32) (int64, error) {
@@ -162,6 +177,47 @@ func (f *FakeLog) Compact(topic string, partition int32, records [][]byte) error
 		fresh[i] = fakeBatch{data: data, baseOffset: int64(i), offsetSpan: 1}
 	}
 	f.batches[key] = fresh
+	return nil
+}
+
+// ApplyRetention is FakeLog's equivalent of Partition.ApplyRetention: no
+// segments here, so it deletes individual entries from the front instead of
+// whole segments, but the same rules apply - either maxAge or maxBytes can
+// be 0 to disable that check, the newest entry is never a candidate
+// (mirroring the active segment's protection), and the scan stops at the
+// first surviving entry since age and total size are both monotonic front
+// to back.
+func (f *FakeLog) ApplyRetention(topic string, partition int32, maxAge time.Duration, maxBytes int64, now time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	entries, ok := f.batches[logKey{topic, partition}]
+	if !ok || len(entries) == 0 {
+		return nil
+	}
+
+	var totalSize int64
+	for _, b := range entries {
+		totalSize += int64(len(b.data))
+	}
+
+	survivorsFrom := 0
+	for survivorsFrom < len(entries)-1 { // never consider the newest entry
+		b := entries[survivorsFrom]
+
+		expiredByAge := maxAge > 0 && now.Sub(b.appendedAt) > maxAge
+		overBudget := maxBytes > 0 && totalSize > maxBytes
+		if !expiredByAge && !overBudget {
+			break
+		}
+
+		totalSize -= int64(len(b.data))
+		survivorsFrom++
+	}
+
+	if survivorsFrom > 0 {
+		f.batches[logKey{topic, partition}] = entries[survivorsFrom:]
+	}
 	return nil
 }
 

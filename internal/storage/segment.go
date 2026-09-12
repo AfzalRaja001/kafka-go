@@ -3,6 +3,7 @@ package storage
 import (
 	"encoding/binary"
 	"os"
+	"time"
 )
 
 // recordHeaderSize is the fixed per-blob header this segment format writes
@@ -81,6 +82,19 @@ func (s *Segment) ReadAt(position int64) ([]byte, int32, error) {
 
 func (s *Segment) Sync() error {
 	return s.file.Sync()
+}
+
+// ModTime returns the segment file's own filesystem modification time -
+// used by retention as a cheap stand-in for "when was this segment's last
+// record written." A segment is immutable once rolled (Partition never
+// appends to a non-active segment again), so its mtime naturally reflects
+// its true last-write time with no extra bookkeeping needed.
+func (s *Segment) ModTime() (time.Time, error) {
+	info, err := s.file.Stat()
+	if err != nil {
+		return time.Time{}, err
+	}
+	return info.ModTime(), nil
 }
 
 // Size returns the segment's current size in bytes - used by Partition to

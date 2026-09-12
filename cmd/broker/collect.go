@@ -59,3 +59,43 @@ func runMetricsCollector(ctx context.Context, interval time.Duration, registry *
 		}
 	}
 }
+
+// applyRetention walks every known topic-partition, deleting whole old
+// segments once they're older than maxAge or the partition exceeds
+// maxBytes - the same "plain function, no ticker" shape collectMetrics
+// already has, for the same reason: independently unit-testable with fakes.
+//
+// A per-partition error is skipped, not fatal, matching collectMetrics'
+// own defensiveness - this runs forever on a ticker, so one bad partition
+// must never take the whole sweep down. In practice DiskLog/FakeLog's
+// ApplyRetention already treat an unknown topic-partition as a no-op
+// rather than an error (a registry/log mismatch, or a race with
+// DeleteTopics), but this doesn't rely on that - it tolerates an error
+// regardless.
+func applyRetention(registry *protocol.TopicRegistry, log storage.Log, maxAge time.Duration, maxBytes int64, now time.Time) {
+	for _, topic := range registry.All() {
+		for _, partition := range topic.Partitions {
+			if err := log.ApplyRetention(topic.Name, partition.ID, maxAge, maxBytes, now); err != nil {
+				continue
+			}
+		}
+	}
+}
+
+// runRetention calls applyRetention on a ticker until ctx is canceled - the
+// tick's own time.Time (not time.Now() inside applyRetention) is what gets
+// passed through, matching runReaper's identical pattern for
+// ReapExpiredMembers.
+func runRetention(ctx context.Context, interval time.Duration, registry *protocol.TopicRegistry, log storage.Log, maxAge time.Duration, maxBytes int64) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			applyRetention(registry, log, maxAge, maxBytes, now)
+		}
+	}
+}

@@ -622,3 +622,62 @@ Verified against a real broker, reproducing the original bug's exact scenario: p
 records to fill ~1MB, then fetching with franz-go's real default fetch size. The same ~8000-record/~1MB Fetch
 request that used to take ~5.68s now completes in roughly 200ms - about a 28x improvement, matching what
 eliminating the `indexEvery`-factor amplification predicts.
+
+## 2026-09-11 - Retention (`cleanup.policy=delete`), and why it needed less than compaction did
+
+Confirmed gap #3 in `docs/plan.md`: `DiskLog.EarliestOffset` was hardcoded to `0`, meaning every record ever
+appended to any topic stayed on disk forever. Distinct from compaction (2026-09-07 entry): compaction keeps the
+latest value per key for `__consumer_offsets` only; retention drops records past an age or size limit
+regardless of key, for every topic.
+
+Broker-wide, not per-topic: `CreateTopics` already decodes and discards per-topic configs (its own comment
+anticipates "retention" as one), but nothing in this project actually needs different retention per topic, and
+every other tunable here (`segmentMaxBytes`, `indexEvery`, every background ticker's interval) is already a
+broker-wide constant. Real per-topic retention is a genuine future extension - the wire format already
+anticipates it - just not one anything currently exercises.
+
+Turned out to need much less new machinery than compaction did, for one structural reason: retention never
+renumbers anything. Deleting old segments from the front of a partition just advances `EarliestOffset` and
+leaves a real gap before it - which is normal, expected Kafka behavior, not a problem to route around the way
+compaction had to route around this segment format's inability to represent gaps at all. `Partition.
+ApplyRetention` (`internal/storage/partition.go`) is a straightforward linear scan from the front, oldest
+segment first, deleting whole segments (reusing `removeSegmentGroupFiles`, built for compaction) while either
+the segment is older than `maxAge` or the partition's total size still exceeds `maxBytes` even after
+already-marked deletions - stopping at the first survivor, since segments are chronologically ordered by
+construction (append-only), so nothing after a survivor could still need deleting either. The active segment is
+never a candidate, the same protection `Compact` already gives it. Either `maxAge` or `maxBytes` can be `0` to
+disable that check, matching real Kafka's own `retention.ms=-1`/`retention.bytes=-1` "unlimited" convention.
+
+A segment's age needed an honest approximation, since this segment format tracks no "largest timestamp seen"
+field: `Segment.ModTime()` reads the `.log` file's own filesystem mtime. A segment is immutable once rolled, so
+its mtime already reflects exactly when its last record was written, for free - no new on-disk state, no
+sparse-index approximation error. Real historical Kafka retention worked the same way.
+
+`storage.Log`'s fifth deliberate extension: `ApplyRetention(topic, partition, maxAge, maxBytes, now)` -
+`DiskLog` delegates to `Partition.ApplyRetention`; `FakeLog` gets a real equivalent (not a stub), operating on
+individual entries instead of segments since it has no segment concept, each entry's simulated age tracked via
+an `appendedAt` field set at `Append` time so tests can drive retention deterministically by passing a `now` far
+in the future rather than needing a fake clock.
+
+The one real correctness gap retention would otherwise open, fixed as part of this piece rather than deferred:
+before this, *any* unreachable offset - "genuinely deleted by retention" and "just caught up, nothing new yet"
+- resolved identically, to an empty response with no error (`Partition.ReadBatch`'s documented contract). Once
+`EarliestOffset` can genuinely advance, that ambiguity stops being harmless - a consumer that fell behind past
+the retention window would poll forever against data that will never arrive, with no signal telling it to
+reseek. Added `ErrOffsetOutOfRange` (code 1, matching real Kafka) and a check in `HandleFetch`'s `fetchOne`: a
+`fetchOffset` below the partition's current `EarliestOffset` returns the error immediately, no long-polling -
+the same "don't wait for something that can't happen" shortcut already used for an unknown topic-partition.
+
+Trigger is a background ticker (`runRetention` in `cmd/broker/main.go`), same shape as every other background
+job this project runs - 5 minutes, matching real Kafka's own default `log.retention.check.interval.ms`.
+`retentionMaxAge` defaults to 7 days (Kafka's real default); `retentionMaxBytes` defaults to `0` (disabled,
+matching Kafka's real `-1`). The pure-function/ticker split (`applyRetention` walks the registry and is
+independently unit-tested with fakes; `runRetention` is a thin wrapper) mirrors `collectMetrics`/
+`runMetricsCollector` exactly.
+
+Verified against a real running broker, with `segmentMaxBytes` and the retention interval/age both temporarily
+shortened for the run (reverted before this was written up): produced 753 small records, forcing roughly 150
+segment rolls. By the time of the check, retention had already swept everything but the active segment down to
+3 files totaling under 150 bytes on disk - confirmed via `ListOffsets(-2)` reporting a real, non-zero
+`EarliestOffset` (752, one before the log's actual end), a `Fetch` at offset 0 correctly returning
+`error_code=1` (`OFFSET_OUT_OF_RANGE`), and a `Fetch` at the real earliest offset still succeeding normally.
