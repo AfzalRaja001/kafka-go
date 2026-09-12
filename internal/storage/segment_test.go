@@ -5,7 +5,32 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestSegment_ModTimeReflectsLastWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "segment.log")
+
+	seg, err := OpenSegment(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer seg.Close()
+
+	before := time.Now().Add(-time.Second) // clock skew slack
+	if _, err := seg.Append([]byte("data"), 1); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	after := time.Now().Add(time.Second)
+
+	mtime, err := seg.ModTime()
+	if err != nil {
+		t.Fatalf("ModTime: %v", err)
+	}
+	if mtime.Before(before) || mtime.After(after) {
+		t.Errorf("ModTime = %v, want between %v and %v", mtime, before, after)
+	}
+}
 
 func TestAppendAndRead(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "segment.log")

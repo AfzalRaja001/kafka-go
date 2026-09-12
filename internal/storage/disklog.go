@@ -151,14 +151,15 @@ func (d *DiskLog) Read(topic string, partition int32, offset int64, maxBytes int
 	return p.ReadBatch(offset, maxBytes)
 }
 
-// EarliestOffset is always 0: segments now roll, but nothing deletes old
-// ones yet - retention (Phase 5) is what would actually drop data, and
-// until it exists every record ever appended is still present.
+// EarliestOffset delegates to Partition.EarliestOffset - 0 until retention
+// has ever deleted anything for this topic-partition, the oldest surviving
+// segment's base offset afterward.
 func (d *DiskLog) EarliestOffset(topic string, partition int32) (int64, error) {
-	if _, ok := d.getPartition(topic, partition); !ok {
+	p, ok := d.getPartition(topic, partition)
+	if !ok {
 		return 0, fmt.Errorf("unknown topic-partition %s-%d", topic, partition)
 	}
-	return 0, nil
+	return p.EarliestOffset(), nil
 }
 
 func (d *DiskLog) LatestOffset(topic string, partition int32) (int64, error) {
@@ -178,6 +179,19 @@ func (d *DiskLog) Compact(topic string, partition int32, records [][]byte) error
 		return fmt.Errorf("unknown topic-partition %s-%d", topic, partition)
 	}
 	return p.Compact(records, time.Now().UnixMilli())
+}
+
+// ApplyRetention delegates straight to Partition.ApplyRetention. Unlike
+// most other methods here, a topic-partition that doesn't exist is not an
+// error - the retention ticker sweeps every topic in the registry on a
+// timer, and one racing with DeleteTopics shouldn't be treated as a
+// failure worth logging.
+func (d *DiskLog) ApplyRetention(topic string, partition int32, maxAge time.Duration, maxBytes int64, now time.Time) error {
+	p, ok := d.getPartition(topic, partition)
+	if !ok {
+		return nil
+	}
+	return p.ApplyRetention(maxAge, maxBytes, now)
 }
 
 func (d *DiskLog) Size(topic string, partition int32) (int64, error) {

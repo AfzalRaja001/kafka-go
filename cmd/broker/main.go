@@ -58,6 +58,19 @@ const (
 	// housekeeping on a low-traffic internal topic, not latency-sensitive
 	// or correctness-critical the way reaping or metrics collection are.
 	offsetsCompactInterval = 5 * time.Minute
+
+	// retentionCheckInterval matches real Kafka's own default
+	// log.retention.check.interval.ms - this is disk-space housekeeping,
+	// not latency-sensitive, so it doesn't need to be any more frequent.
+	retentionCheckInterval = 5 * time.Minute
+
+	// retentionMaxAge matches real Kafka's own default retention.ms (7
+	// days). retentionMaxBytes is 0 (disabled) by default, matching real
+	// Kafka's retention.bytes=-1 "unlimited" convention - either can be
+	// set to bound a partition's disk footprint by size instead of or in
+	// addition to age.
+	retentionMaxAge   = 7 * 24 * time.Hour
+	retentionMaxBytes = 0
 )
 
 func main() {
@@ -87,6 +100,7 @@ func main() {
 	go runMetricsServer(ctx, recorder)
 	go runMetricsCollector(ctx, metricsCollectInterval, registry, diskLog, offsetStore, recorder)
 	go runOffsetsCompactor(ctx, offsetsCompactInterval, offsetStore)
+	go runRetention(ctx, retentionCheckInterval, registry, diskLog, retentionMaxAge, retentionMaxBytes)
 
 	log.Printf("kafka-go broker listening on %s", listenAddr)
 	if err := broker.Serve(ctx, listenAddr, registry, brokers, diskLog, offsetStore, coord, recorder); err != nil {

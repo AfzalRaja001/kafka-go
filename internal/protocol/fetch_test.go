@@ -209,6 +209,81 @@ func TestHandleFetch_UnknownTopicPartitionReturnsQuickly(t *testing.T) {
 	}
 }
 
+// TestHandleFetch_OffsetBelowEarliestReturnsOutOfRangeQuickly proves the
+// gap retention would otherwise open: once EarliestOffset can genuinely
+// advance past 0, a client asking for an offset retention already deleted
+// must get an actionable error, not a silent empty response indistinguishable
+// from "caught up, nothing new yet" - which would leave it stalled forever.
+func TestHandleFetch_OffsetBelowEarliestReturnsOutOfRangeQuickly(t *testing.T) {
+	log := storage.NewFakeLog()
+	for i := 0; i < 5; i++ {
+		log.Append("orders", 0, []byte("record"), 1)
+	}
+	// Simulate retention having already deleted offset 0's entry - a large
+	// maxAge in the future ages every entry except the newest past a 1-hour
+	// limit.
+	future := time.Now().Add(365 * 24 * time.Hour)
+	if err := log.ApplyRetention("orders", 0, time.Hour, 0, future); err != nil {
+		t.Fatalf("ApplyRetention: %v", err)
+	}
+	earliest, err := log.EarliestOffset("orders", 0)
+	if err != nil || earliest == 0 {
+		t.Fatalf("test setup: EarliestOffset = %d, %v, want > 0 after retention", earliest, err)
+	}
+
+	body := encodeFetchRequest(2000, 1, "orders", 0, 0, 1024) // offset 0, now deleted
+
+	start := time.Now()
+	resp, err := HandleFetch(1, body, log)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("HandleFetch: %v", err)
+	}
+	if elapsed > 200*time.Millisecond {
+		t.Errorf("took %v to reject a deleted offset, want near-instant (max_wait_time_ms was 2000)", elapsed)
+	}
+
+	data, errorCode, _ := decodeFetchPartitionResponse(t, resp)
+	if errorCode != ErrOffsetOutOfRange {
+		t.Errorf("error_code = %d, want %d (ErrOffsetOutOfRange)", errorCode, ErrOffsetOutOfRange)
+	}
+	if len(data) != 0 {
+		t.Errorf("data = %q, want empty alongside an error", data)
+	}
+}
+
+// TestHandleFetch_OffsetAtOrAboveEarliestStillWorks is the non-regression
+// check: EarliestOffset being nonzero must not reject offsets that are
+// still genuinely present.
+func TestHandleFetch_OffsetAtOrAboveEarliestStillWorks(t *testing.T) {
+	log := storage.NewFakeLog()
+	for i := 0; i < 5; i++ {
+		log.Append("orders", 0, []byte("record"), 1)
+	}
+	future := time.Now().Add(365 * 24 * time.Hour)
+	if err := log.ApplyRetention("orders", 0, time.Hour, 0, future); err != nil {
+		t.Fatalf("ApplyRetention: %v", err)
+	}
+	earliest, err := log.EarliestOffset("orders", 0)
+	if err != nil || earliest == 0 {
+		t.Fatalf("test setup: EarliestOffset = %d, %v, want > 0", earliest, err)
+	}
+
+	body := encodeFetchRequest(100, 0, "orders", 0, earliest, 1024)
+
+	resp, err := HandleFetch(1, body, log)
+	if err != nil {
+		t.Fatalf("HandleFetch: %v", err)
+	}
+	data, errorCode, _ := decodeFetchPartitionResponse(t, resp)
+	if errorCode != ErrNone {
+		t.Errorf("error_code = %d, want ErrNone", errorCode)
+	}
+	if string(data) != "record" {
+		t.Errorf("data = %q, want %q", data, "record")
+	}
+}
+
 func TestHandleFetch_RespectsMaxBytes(t *testing.T) {
 	log := storage.NewFakeLog()
 	log.Append("orders", 0, []byte("first"), 1)
