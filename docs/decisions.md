@@ -584,3 +584,41 @@ it correctly, still reporting offset 100 with the file still at its compacted 20
 
 This closes out Phase 5 Track B's log compaction item and, with it, everything Phase 5 originally scoped for
 both tracks.
+
+## 2026-09-08 - `Partition.ReadBatch`: fixing a real O(n * indexEvery) Fetch bug
+
+Flagged as a follow-up during the benchmark work (PR #26): a live run showed a single Fetch pulling ~1MB out of
+small (128-byte) records took ~5.68 real seconds - franz-go's default per-partition fetch size, so any real
+client hitting this broker with enough small records would hit the same wall.
+
+Traced before writing any code, not assumed: the actual cause wasn't syscall count, it was redundant
+re-scanning. `DiskLog.Read` used to call `Partition.Read(offset)` once per blob in a loop, and `Partition.Read`
+-> `FindRecord` does a sparse-index lookup then scans forward blob-by-blob from that indexed entry to reach the
+target. Since the loop restarted this from scratch for every single blob rather than continuing from where the
+previous call left off, reading blob *k* within an `indexEvery`-sized window rescanned all *k* blobs before it
+from the window's start. Summed across a whole window that's roughly `indexEvery^2 / 2` redundant blob-reads to
+walk through `indexEvery` real blobs - O(n * indexEvery) total instead of O(n). With production's real
+`indexEvery=100` and the benchmark's ~8000 small records (comfortably inside one segment, so this was entirely
+a within-segment effect), that amplification alone plausibly explains the ~5.68s.
+
+The fix consolidates the whole multi-blob accumulation into one new method, `Partition.ReadBatch(offset,
+maxBytes)`, replacing `DiskLog.Read`'s old external loop entirely (`DiskLog.Read` is now a one-line delegation).
+`ReadBatch` does exactly one sparse-index lookup - for the segment containing the starting offset - then keeps
+scanning forward from wherever the previous blob left off, crossing into the next segment (position 0, no index
+lookup needed for a fresh segment's first blob) if `maxBytes` isn't hit before the current one runs out.
+`Partition.Read` (the single-blob method) is untouched - it's still exactly right for the point-lookup tests
+that use it directly, and was never the slow path; only the pattern of calling it in a loop was. Added
+`findSegmentIndex` (returns the segment's position in `p.segments`, not just the segment itself) since
+`ReadBatch` needs to advance to `segIdx+1` on segment rollover; `findSegment` is now a thin wrapper over it.
+
+`ReadBatch` preserves `DiskLog.Read`'s exact existing observable contract, which mattered as much as the speed
+fix itself: `DiskLog.Read` has never returned a non-nil error, even for an out-of-range offset - any failure
+just meant "return whatever was collected so far," because Fetch's long-polling logic treats "nothing new yet"
+as an empty response, not a failure. `ReadBatch` replicates this exactly (offset unreachable, or a mid-scan
+read failure, both resolve to empty bytes and a nil error) - this is a pure speed fix, verified byte-for-byte
+against the old behavior by every existing `DiskLog.Read` test passing unchanged.
+
+Verified against a real broker, reproducing the original bug's exact scenario: producing enough small (128-byte)
+records to fill ~1MB, then fetching with franz-go's real default fetch size. The same ~8000-record/~1MB Fetch
+request that used to take ~5.68s now completes in roughly 200ms - about a 28x improvement, matching what
+eliminating the `indexEvery`-factor amplification predicts.
