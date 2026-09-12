@@ -5,6 +5,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 )
 
 func openTestPartition(t *testing.T, segmentMaxBytes int64, indexEvery int32) *Partition {
@@ -203,6 +204,188 @@ func TestPartition_CompactSurvivesReopen(t *testing.T) {
 	data, _, err := reopened.Read(0)
 	if err != nil || string(data) != "kept" {
 		t.Fatalf("Read(0) after reopen = (%q, %v), want (\"kept\", nil)", data, err)
+	}
+}
+
+func TestPartition_ReadBatchWithinOneSegment(t *testing.T) {
+	p := openTestPartition(t, 1<<20, 5) // large segmentMaxBytes - single segment
+	defer p.Close()
+
+	for i := 0; i < 10; i++ {
+		p.Append([]byte(fmt.Sprintf("record-%d", i)), 1, 1000)
+	}
+
+	got, err := p.ReadBatch(0, 1<<20)
+	if err != nil {
+		t.Fatalf("ReadBatch: %v", err)
+	}
+	var want []byte
+	for i := 0; i < 10; i++ {
+		want = append(want, []byte(fmt.Sprintf("record-%d", i))...)
+	}
+	if string(got) != string(want) {
+		t.Errorf("ReadBatch(0, big) = %q, want %q", got, want)
+	}
+}
+
+func TestPartition_ReadBatchStartsMidWindowUsesSparseIndexCorrectly(t *testing.T) {
+	// indexEvery=5 means offsets 0..9 span two sparse-index windows -
+	// starting the read partway through the second window is what exercises
+	// the "skip blobs before the target, then start accumulating" logic.
+	p := openTestPartition(t, 1<<20, 5)
+	defer p.Close()
+
+	for i := 0; i < 10; i++ {
+		p.Append([]byte(fmt.Sprintf("record-%d", i)), 1, 1000)
+	}
+
+	got, err := p.ReadBatch(7, 1<<20)
+	if err != nil {
+		t.Fatalf("ReadBatch: %v", err)
+	}
+	want := "record-7record-8record-9"
+	if string(got) != want {
+		t.Errorf("ReadBatch(7, big) = %q, want %q", got, want)
+	}
+}
+
+func TestPartition_ReadBatchRespectsMaxBytes(t *testing.T) {
+	p := openTestPartition(t, 1<<20, 5)
+	defer p.Close()
+
+	for i := 0; i < 10; i++ {
+		p.Append([]byte(fmt.Sprintf("record-%d", i)), 1, 1000) // 8 bytes each
+	}
+
+	// Budget for exactly 3 records (3*8=24), not enough for a 4th.
+	got, err := p.ReadBatch(0, 24)
+	if err != nil {
+		t.Fatalf("ReadBatch: %v", err)
+	}
+	want := "record-0record-1record-2"
+	if string(got) != want {
+		t.Errorf("ReadBatch(0, 24) = %q, want %q", got, want)
+	}
+}
+
+// TestPartition_ReadBatchFirstBlobExceedsMaxBytesReturnsEmpty matches
+// DiskLog.Read's existing, deliberate contract: if even the first blob
+// would overflow the budget, the result is empty rather than one
+// over-budget blob - this must not change just because the accumulation
+// loop moved into Partition.
+func TestPartition_ReadBatchFirstBlobExceedsMaxBytesReturnsEmpty(t *testing.T) {
+	p := openTestPartition(t, 1<<20, 5)
+	defer p.Close()
+
+	p.Append([]byte("a-fairly-long-record"), 1, 1000)
+
+	got, err := p.ReadBatch(0, 3)
+	if err != nil {
+		t.Fatalf("ReadBatch: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("ReadBatch(0, 3) = %q, want empty (first blob already exceeds maxBytes)", got)
+	}
+}
+
+func TestPartition_ReadBatchCrossesSegments(t *testing.T) {
+	p := openTestPartition(t, 40, 1000) // tiny segmentMaxBytes forces rolling
+	defer p.Close()
+
+	for i := 0; i < 20; i++ {
+		p.Append([]byte(fmt.Sprintf("record-%d", i)), 1, 1000)
+	}
+	if len(p.segments) < 2 {
+		t.Fatalf("test setup: expected multiple segments, got %d", len(p.segments))
+	}
+
+	got, err := p.ReadBatch(0, 1<<20)
+	if err != nil {
+		t.Fatalf("ReadBatch: %v", err)
+	}
+	var want []byte
+	for i := 0; i < 20; i++ {
+		want = append(want, []byte(fmt.Sprintf("record-%d", i))...)
+	}
+	if string(got) != string(want) {
+		t.Errorf("ReadBatch(0, big) across segments = %q, want %q", got, want)
+	}
+}
+
+func TestPartition_ReadBatchStartingMidwayThroughARolledSegment(t *testing.T) {
+	p := openTestPartition(t, 40, 1000)
+	defer p.Close()
+
+	for i := 0; i < 20; i++ {
+		p.Append([]byte(fmt.Sprintf("record-%d", i)), 1, 1000)
+	}
+	if len(p.segments) < 2 {
+		t.Fatalf("test setup: expected multiple segments, got %d", len(p.segments))
+	}
+
+	got, err := p.ReadBatch(15, 1<<20)
+	if err != nil {
+		t.Fatalf("ReadBatch: %v", err)
+	}
+	var want []byte
+	for i := 15; i < 20; i++ {
+		want = append(want, []byte(fmt.Sprintf("record-%d", i))...)
+	}
+	if string(got) != string(want) {
+		t.Errorf("ReadBatch(15, big) = %q, want %q", got, want)
+	}
+}
+
+// TestPartition_ReadBatchOffsetOutOfRangeIsEmptyNotError matches
+// DiskLog.Read's overall contract (never surfaces an error - Fetch's
+// long-polling logic treats "nothing here yet" as an empty response, not a
+// failure). ReadBatch itself owns that contract now that DiskLog.Read just
+// delegates straight to it.
+func TestPartition_ReadBatchOffsetOutOfRangeIsEmptyNotError(t *testing.T) {
+	p := openTestPartition(t, 1<<20, 5)
+	defer p.Close()
+
+	p.Append([]byte("only-record"), 1, 1000)
+
+	got, err := p.ReadBatch(50, 1<<20)
+	if err != nil {
+		t.Fatalf("ReadBatch(50, ...) returned an error, want nil: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("ReadBatch(50, ...) = %q, want empty", got)
+	}
+}
+
+// TestPartition_ReadBatchManyRecordsIsFast is the actual regression test
+// for the bug this method exists to fix: DiskLog.Read used to restart the
+// sparse-index lookup and rescan from that window's start for every single
+// blob, making a full read O(n * indexEvery) instead of O(n). With
+// indexEvery=100 and 5000 small records, the old behavior would take
+// multiple real seconds (this is what a live benchmark run actually
+// measured); a correct single-scan implementation finishes in milliseconds.
+// The bound here is deliberately generous - not a tight benchmark, just a
+// tripwire against ever regressing back to quadratic behavior.
+func TestPartition_ReadBatchManyRecordsIsFast(t *testing.T) {
+	p := openTestPartition(t, 1<<24, 100) // matches production's real indexEvery
+	defer p.Close()
+
+	const n = 5000
+	for i := 0; i < n; i++ {
+		p.Append([]byte(fmt.Sprintf("record-%d", i)), 1, 1000)
+	}
+
+	start := time.Now()
+	got, err := p.ReadBatch(0, 1<<20)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("ReadBatch: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("ReadBatch returned no data")
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("ReadBatch of %d records took %s, want well under 500ms (quadratic regression?)", n, elapsed)
 	}
 }
 
