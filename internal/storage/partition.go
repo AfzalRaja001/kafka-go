@@ -28,20 +28,27 @@ type segmentGroup struct {
 // last in the list - is active (writable); every segment before it is
 // immutable, never touched again except to be read.
 type Partition struct {
-	mu              sync.RWMutex
-	dir             string
-	segmentMaxBytes int64
-	indexEvery      int32
-	segments        []*segmentGroup
-	sinceLastIdx    int32
-	nextOffset      atomic.Int64
+	mu                 sync.RWMutex
+	dir                string
+	segmentMaxBytes    int64
+	indexEvery         int32
+	flushEveryMessages int32
+	segments           []*segmentGroup
+	sinceLastIdx       int32
+	sinceLastFlush     int32
+	nextOffset         atomic.Int64
 }
 
 // OpenPartition opens dir as a partition directory, discovering any
 // existing segments by scanning for *.log files and parsing their base
 // offset back out of the filename. A brand-new directory gets a single
 // segment starting at offset 0.
-func OpenPartition(dir string, segmentMaxBytes int64, indexEvery int32) (*Partition, error) {
+//
+// flushEveryMessages is the count-based half of the fsync policy: once this
+// many records have been appended since the active segment's last flush,
+// Append fsyncs it. 0 disables this check entirely (the time-based half,
+// Sync, still works regardless - see its own doc comment).
+func OpenPartition(dir string, segmentMaxBytes int64, indexEvery, flushEveryMessages int32) (*Partition, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, err
 	}
@@ -51,7 +58,7 @@ func OpenPartition(dir string, segmentMaxBytes int64, indexEvery int32) (*Partit
 		return nil, err
 	}
 
-	p := &Partition{dir: dir, segmentMaxBytes: segmentMaxBytes, indexEvery: indexEvery}
+	p := &Partition{dir: dir, segmentMaxBytes: segmentMaxBytes, indexEvery: indexEvery, flushEveryMessages: flushEveryMessages}
 
 	if len(bases) == 0 {
 		sg, err := openSegmentGroup(dir, 0)
@@ -169,6 +176,14 @@ func (p *Partition) appendLocked(data []byte, offsetSpan int32, timestamp int64)
 	active := p.segments[len(p.segments)-1]
 
 	if active.seg.Size() >= p.segmentMaxBytes {
+		// The outgoing segment gets no more Append calls ever again, so its
+		// count-based flush check above would never fire for whatever's
+		// left unflushed since its own last check - fsync it unconditionally
+		// here instead, regardless of flushEveryMessages or sinceLastFlush.
+		if err := active.seg.Sync(); err != nil {
+			return 0, err
+		}
+
 		newBase := p.nextOffset.Load()
 		sg, err := openSegmentGroup(p.dir, newBase)
 		if err != nil {
@@ -176,7 +191,8 @@ func (p *Partition) appendLocked(data []byte, offsetSpan int32, timestamp int64)
 		}
 		p.segments = append(p.segments, sg)
 		active = sg
-		p.sinceLastIdx = 0 // a new segment's index restarts fresh, relative offset 0
+		p.sinceLastIdx = 0   // a new segment's index restarts fresh, relative offset 0
+		p.sinceLastFlush = 0 // the new segment starts with nothing unflushed
 	}
 
 	pos, err := active.seg.Append(data, offsetSpan)
@@ -194,6 +210,18 @@ func (p *Partition) appendLocked(data []byte, offsetSpan int32, timestamp int64)
 
 	p.sinceLastIdx = (p.sinceLastIdx + 1) % p.indexEvery
 	p.nextOffset.Add(int64(offsetSpan))
+
+	// The time-based half of the fsync policy (Sync) covers a partition too
+	// low-traffic to ever reach flushEveryMessages; this covers the reverse
+	// case - bursty traffic that would otherwise sit unflushed in the OS
+	// page cache for the entire time-based interval.
+	p.sinceLastFlush++
+	if p.flushEveryMessages > 0 && p.sinceLastFlush >= p.flushEveryMessages {
+		if err := active.seg.Sync(); err != nil {
+			return 0, err
+		}
+		p.sinceLastFlush = 0
+	}
 
 	return offset, nil
 }
@@ -242,6 +270,7 @@ func (p *Partition) Compact(records [][]byte, timestamp int64) error {
 	p.segments = []*segmentGroup{fresh}
 	p.nextOffset.Store(0)
 	p.sinceLastIdx = 0
+	p.sinceLastFlush = 0
 
 	for _, data := range records {
 		if _, err := p.appendLocked(data, 1, timestamp); err != nil {
@@ -455,6 +484,26 @@ func (p *Partition) ReadBatch(offset int64, maxBytes int32) ([]byte, error) {
 	}
 
 	return out, nil
+}
+
+// Sync fsyncs the active segment - the time-based half of the fsync policy,
+// meant to be called on a ticker (see cmd/broker's runFlush) rather than
+// from Append itself, so a low-traffic partition that never reaches
+// flushEveryMessages still gets flushed within some bounded time. Takes the
+// exclusive lock like Append, since it touches the same active segment and
+// resets the same sinceLastFlush counter - a Sync racing with an Append that
+// was about to trigger its own count-based flush must not fsync twice for
+// one reason and then still leave sinceLastFlush stale for the other.
+func (p *Partition) Sync() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	active := p.segments[len(p.segments)-1]
+	if err := active.seg.Sync(); err != nil {
+		return err
+	}
+	p.sinceLastFlush = 0
+	return nil
 }
 
 // LogEndOffset is deliberately lock-free: nextOffset doesn't need to be

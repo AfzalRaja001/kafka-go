@@ -8,7 +8,7 @@ import (
 )
 
 func TestDiskLog_AppendAndRead(t *testing.T) {
-	log := NewDiskLog(t.TempDir(), 1<<20, 5)
+	log := NewDiskLog(t.TempDir(), 1<<20, 5, 0)
 	defer log.Close()
 
 	base, err := log.Append("orders", 0, []byte("first"), 1)
@@ -37,7 +37,7 @@ func TestDiskLog_AppendAndRead(t *testing.T) {
 }
 
 func TestDiskLog_ReadRespectsMaxBytes(t *testing.T) {
-	log := NewDiskLog(t.TempDir(), 1<<20, 5)
+	log := NewDiskLog(t.TempDir(), 1<<20, 5, 0)
 	defer log.Close()
 
 	log.Append("orders", 0, []byte("first"), 1)  // 5 bytes
@@ -53,7 +53,7 @@ func TestDiskLog_ReadRespectsMaxBytes(t *testing.T) {
 }
 
 func TestDiskLog_ReadUnknownTopicPartitionErrors(t *testing.T) {
-	log := NewDiskLog(t.TempDir(), 1<<20, 5)
+	log := NewDiskLog(t.TempDir(), 1<<20, 5, 0)
 	defer log.Close()
 
 	if _, err := log.Read("missing", 0, 0, 1024); err == nil {
@@ -68,7 +68,7 @@ func TestDiskLog_ReadUnknownTopicPartitionErrors(t *testing.T) {
 }
 
 func TestDiskLog_EarliestAndLatestOffset(t *testing.T) {
-	log := NewDiskLog(t.TempDir(), 1<<20, 5)
+	log := NewDiskLog(t.TempDir(), 1<<20, 5, 0)
 	defer log.Close()
 
 	for i := 0; i < 5; i++ {
@@ -86,7 +86,7 @@ func TestDiskLog_EarliestAndLatestOffset(t *testing.T) {
 }
 
 func TestDiskLog_PartitionsAreIndependent(t *testing.T) {
-	log := NewDiskLog(t.TempDir(), 1<<20, 5)
+	log := NewDiskLog(t.TempDir(), 1<<20, 5, 0)
 	defer log.Close()
 
 	log.Append("orders", 0, []byte("orders-p0"), 1)
@@ -104,7 +104,7 @@ func TestDiskLog_PartitionsAreIndependent(t *testing.T) {
 }
 
 func TestDiskLog_SegmentRolling(t *testing.T) {
-	log := NewDiskLog(t.TempDir(), 10, 1000) // tiny segmentMaxBytes forces rolling
+	log := NewDiskLog(t.TempDir(), 10, 1000, 0) // tiny segmentMaxBytes forces rolling
 	defer log.Close()
 
 	for i := 0; i < 5; i++ {
@@ -136,7 +136,7 @@ func TestDiskLog_SegmentRolling(t *testing.T) {
 // with nothing ever Appended, Read/EarliestOffset/LatestOffset must all
 // succeed as "empty", not error as "unknown topic-partition".
 func TestDiskLog_CreatePartitionMakesEmptyTopicReadable(t *testing.T) {
-	log := NewDiskLog(t.TempDir(), 1<<20, 5)
+	log := NewDiskLog(t.TempDir(), 1<<20, 5, 0)
 	defer log.Close()
 
 	if err := log.CreatePartition("fresh-topic", 0); err != nil {
@@ -162,7 +162,7 @@ func TestDiskLog_CreatePartitionMakesEmptyTopicReadable(t *testing.T) {
 // registry first, but which the storage layer's own contract shouldn't rely
 // on callers to avoid - doesn't reopen or wipe an already-populated partition.
 func TestDiskLog_CreatePartitionIsIdempotent(t *testing.T) {
-	log := NewDiskLog(t.TempDir(), 1<<20, 5)
+	log := NewDiskLog(t.TempDir(), 1<<20, 5, 0)
 	defer log.Close()
 
 	log.CreatePartition("orders", 0)
@@ -184,7 +184,7 @@ func TestDiskLog_CreatePartitionIsIdempotent(t *testing.T) {
 // map - otherwise a restarted broker would see the "deleted" topic reappear.
 func TestDiskLog_DeletePartitionRemovesFilesFromDisk(t *testing.T) {
 	dir := t.TempDir()
-	log := NewDiskLog(dir, 1<<20, 5)
+	log := NewDiskLog(dir, 1<<20, 5, 0)
 	defer log.Close()
 
 	log.Append("orders", 0, []byte("first"), 1)
@@ -211,7 +211,7 @@ func TestDiskLog_DeletePartitionRemovesFilesFromDisk(t *testing.T) {
 // DeletePartition on something that was never created should not need its
 // own error path for that case.
 func TestDiskLog_DeletePartitionUnknownIsNotAnError(t *testing.T) {
-	log := NewDiskLog(t.TempDir(), 1<<20, 5)
+	log := NewDiskLog(t.TempDir(), 1<<20, 5, 0)
 	defer log.Close()
 
 	if err := log.DeletePartition("never-existed", 0); err != nil {
@@ -227,7 +227,7 @@ func TestDiskLog_DeletePartitionUnknownIsNotAnError(t *testing.T) {
 // simpler single-partition, Append-only-no-CreatePartition case (the
 // existing TestDiskLog_DeletePartitionRemovesFilesFromDisk) passed clean.
 func TestDiskLog_DeletePartitionAfterCreatePartitionAndAppend(t *testing.T) {
-	log := NewDiskLog(t.TempDir(), 1<<20, 5)
+	log := NewDiskLog(t.TempDir(), 1<<20, 5, 0)
 	defer log.Close()
 
 	for p := int32(0); p < 3; p++ {
@@ -249,13 +249,13 @@ func TestDiskLog_DeletePartitionAfterCreatePartitionAndAppend(t *testing.T) {
 func TestDiskLog_PersistsAcrossReopen(t *testing.T) {
 	dir := t.TempDir()
 
-	log1 := NewDiskLog(dir, 1<<20, 5)
+	log1 := NewDiskLog(dir, 1<<20, 5, 0)
 	log1.Append("orders", 0, []byte("durable"), 1)
 	if err := log1.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
 
-	log2 := NewDiskLog(dir, 1<<20, 5)
+	log2 := NewDiskLog(dir, 1<<20, 5, 0)
 	defer log2.Close()
 
 	got, err := log2.Read("orders", 0, 0, 1024)
@@ -273,7 +273,7 @@ func TestDiskLog_PersistsAcrossReopen(t *testing.T) {
 // and Size reports genuine on-disk footprint, the thing this metric exists
 // to measure, not just logical payload size.
 func TestDiskLog_SizeReflectsBytesActuallyAppended(t *testing.T) {
-	log := NewDiskLog(t.TempDir(), 1<<20, 5)
+	log := NewDiskLog(t.TempDir(), 1<<20, 5, 0)
 	defer log.Close()
 
 	log.Append("orders", 0, []byte("first"), 1)  // 5 bytes + 8-byte header
@@ -290,7 +290,7 @@ func TestDiskLog_SizeReflectsBytesActuallyAppended(t *testing.T) {
 }
 
 func TestDiskLog_SizeUnknownTopicPartitionErrors(t *testing.T) {
-	log := NewDiskLog(t.TempDir(), 1<<20, 5)
+	log := NewDiskLog(t.TempDir(), 1<<20, 5, 0)
 	defer log.Close()
 
 	if _, err := log.Size("missing", 0); err == nil {
@@ -304,13 +304,13 @@ func TestDiskLog_SizeUnknownTopicPartitionErrors(t *testing.T) {
 func TestDiskLog_SizeSurvivesReopen(t *testing.T) {
 	dir := t.TempDir()
 
-	log1 := NewDiskLog(dir, 1<<20, 5)
+	log1 := NewDiskLog(dir, 1<<20, 5, 0)
 	log1.Append("orders", 0, []byte("durable"), 1) // 7 bytes + 8-byte header
 	if err := log1.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
 
-	log2 := NewDiskLog(dir, 1<<20, 5)
+	log2 := NewDiskLog(dir, 1<<20, 5, 0)
 	defer log2.Close()
 
 	got, err := log2.Size("orders", 0)
@@ -328,7 +328,7 @@ func TestDiskLog_SizeSurvivesReopen(t *testing.T) {
 // is every segment it's ever rolled to, not just the one still being
 // written.
 func TestDiskLog_SizeSumsAcrossRolledSegments(t *testing.T) {
-	log := NewDiskLog(t.TempDir(), 10, 1000) // tiny segmentMaxBytes forces rolling
+	log := NewDiskLog(t.TempDir(), 10, 1000, 0) // tiny segmentMaxBytes forces rolling
 	defer log.Close()
 
 	var want int64
@@ -350,7 +350,7 @@ func TestDiskLog_SizeSumsAcrossRolledSegments(t *testing.T) {
 }
 
 func TestDiskLog_CompactReplacesRecordsAndReclaimsSpace(t *testing.T) {
-	log := NewDiskLog(t.TempDir(), 1<<20, 5)
+	log := NewDiskLog(t.TempDir(), 1<<20, 5, 0)
 	defer log.Close()
 
 	for i := 0; i < 10; i++ {
@@ -391,10 +391,36 @@ func TestDiskLog_CompactReplacesRecordsAndReclaimsSpace(t *testing.T) {
 }
 
 func TestDiskLog_CompactUnknownTopicPartitionErrors(t *testing.T) {
-	log := NewDiskLog(t.TempDir(), 1<<20, 5)
+	log := NewDiskLog(t.TempDir(), 1<<20, 5, 0)
 	defer log.Close()
 
 	if err := log.Compact("missing", 0, [][]byte{[]byte("x")}); err == nil {
 		t.Fatal("expected an error for an unknown topic-partition, got nil")
+	}
+}
+
+func TestDiskLog_SyncFlushesExistingPartition(t *testing.T) {
+	log := NewDiskLog(t.TempDir(), 1<<20, 5, 0)
+	defer log.Close()
+
+	if _, err := log.Append("orders", 0, []byte("hello"), 1); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	if err := log.Sync("orders", 0); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+}
+
+// TestDiskLog_SyncUnknownTopicPartitionIsNotAnError matches ApplyRetention's
+// own leniency: Sync is meant to be called by a sweep across every known
+// partition on a timer, and one racing with DeleteTopics shouldn't be
+// treated as a failure worth logging.
+func TestDiskLog_SyncUnknownTopicPartitionIsNotAnError(t *testing.T) {
+	log := NewDiskLog(t.TempDir(), 1<<20, 5, 0)
+	defer log.Close()
+
+	if err := log.Sync("missing", 0); err != nil {
+		t.Fatalf("Sync on an unknown topic-partition: got %v, want nil", err)
 	}
 }

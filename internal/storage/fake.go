@@ -11,6 +11,13 @@ import (
 type FakeLog struct {
 	mu      sync.RWMutex
 	batches map[logKey][]fakeBatch
+
+	// syncCalls counts Sync calls per topic-partition. FakeLog has no real
+	// segments to fsync, so Sync is otherwise a no-op - this exists purely
+	// so a test can confirm a sweep genuinely reached every known partition,
+	// the same way ApplyRetention's own tests check via a real side effect
+	// (EarliestOffset moving) that FakeLog has no equivalent of here.
+	syncCalls map[logKey]int
 }
 
 // fakeBatch mirrors what DiskLog stores per append: the opaque bytes, the
@@ -34,7 +41,10 @@ type logKey struct {
 }
 
 func NewFakeLog() *FakeLog {
-	return &FakeLog{batches: make(map[logKey][]fakeBatch)}
+	return &FakeLog{
+		batches:   make(map[logKey][]fakeBatch),
+		syncCalls: make(map[logKey]int),
+	}
 }
 
 func (f *FakeLog) Append(topic string, partition int32, batch []byte, recordCount int32) (int64, error) {
@@ -219,6 +229,26 @@ func (f *FakeLog) ApplyRetention(topic string, partition int32, maxAge time.Dura
 		f.batches[logKey{topic, partition}] = entries[survivorsFrom:]
 	}
 	return nil
+}
+
+// Sync records that it was called, whether or not the topic-partition
+// exists - matching DiskLog.Sync's own leniency, since this is meant to be
+// called by a sweep across every known partition on a timer.
+func (f *FakeLog) Sync(topic string, partition int32) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.syncCalls[logKey{topic, partition}]++
+	return nil
+}
+
+// SyncCallCount reports how many times Sync was called for a given
+// topic-partition - test-only introspection, not part of the Log interface.
+func (f *FakeLog) SyncCallCount(topic string, partition int32) int {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	return f.syncCalls[logKey{topic, partition}]
 }
 
 func (f *FakeLog) Size(topic string, partition int32) (int64, error) {

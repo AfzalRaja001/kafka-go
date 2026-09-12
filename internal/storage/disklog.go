@@ -12,21 +12,23 @@ import (
 // (topic, partition) pair, each in its own subdirectory under dir, matching
 // the directory layout kafka-from-scratch.md Part 3 describes.
 type DiskLog struct {
-	mu              sync.RWMutex
-	dir             string
-	segmentMaxBytes int64
-	indexEvery      int32
-	parts           map[logKey]*Partition
+	mu                 sync.RWMutex
+	dir                string
+	segmentMaxBytes    int64
+	indexEvery         int32
+	flushEveryMessages int32
+	parts              map[logKey]*Partition
 }
 
 var _ Log = (*DiskLog)(nil)
 
-func NewDiskLog(dir string, segmentMaxBytes int64, indexEvery int32) *DiskLog {
+func NewDiskLog(dir string, segmentMaxBytes int64, indexEvery, flushEveryMessages int32) *DiskLog {
 	return &DiskLog{
-		dir:             dir,
-		segmentMaxBytes: segmentMaxBytes,
-		indexEvery:      indexEvery,
-		parts:           make(map[logKey]*Partition),
+		dir:                dir,
+		segmentMaxBytes:    segmentMaxBytes,
+		indexEvery:         indexEvery,
+		flushEveryMessages: flushEveryMessages,
+		parts:              make(map[logKey]*Partition),
 	}
 }
 
@@ -85,7 +87,7 @@ func (d *DiskLog) openPartition(topic string, partition int32) (*Partition, erro
 	// OpenPartition creates partDir itself and discovers/creates segments
 	// within it - DiskLog only needs to know the directory, not individual
 	// segment filenames, now that Partition manages rolling internally.
-	p, err := OpenPartition(partDir, d.segmentMaxBytes, d.indexEvery)
+	p, err := OpenPartition(partDir, d.segmentMaxBytes, d.indexEvery, d.flushEveryMessages)
 	if err != nil {
 		return nil, err
 	}
@@ -192,6 +194,19 @@ func (d *DiskLog) ApplyRetention(topic string, partition int32, maxAge time.Dura
 		return nil
 	}
 	return p.ApplyRetention(maxAge, maxBytes, now)
+}
+
+// Sync delegates straight to Partition.Sync. Unlike most other methods
+// here but matching ApplyRetention, a topic-partition that doesn't exist is
+// not an error - the flush ticker sweeps every topic in the registry on a
+// timer, and one racing with DeleteTopics shouldn't be treated as a failure
+// worth logging.
+func (d *DiskLog) Sync(topic string, partition int32) error {
+	p, ok := d.getPartition(topic, partition)
+	if !ok {
+		return nil
+	}
+	return p.Sync()
 }
 
 func (d *DiskLog) Size(topic string, partition int32) (int64, error) {

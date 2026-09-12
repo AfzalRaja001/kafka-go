@@ -71,10 +71,22 @@ const (
 	// addition to age.
 	retentionMaxAge   = 7 * 24 * time.Hour
 	retentionMaxBytes = 0
+
+	// flushEveryMessages and flushInterval are the fsync policy's two
+	// independent triggers - whichever fires first flushes a partition's
+	// active segment. Real Kafka's own defaults for these are effectively
+	// disabled (it relies on replication, not fsync, for durability); this
+	// project has no replication yet, so an unflushed page-cache write is
+	// the only copy of that data if the machine crashes, not just the
+	// process. 1000 messages / 5 seconds bounds worst-case data loss to
+	// roughly that much without fsync-ing on every single append, which
+	// would tank throughput.
+	flushEveryMessages = 1000
+	flushInterval      = 5 * time.Second
 )
 
 func main() {
-	diskLog := storage.NewDiskLog(dataDir, segmentMaxBytes, indexEvery)
+	diskLog := storage.NewDiskLog(dataDir, segmentMaxBytes, indexEvery, flushEveryMessages)
 	defer diskLog.Close()
 
 	// No hardcoded topic anymore: CreateTopics (api_key 19) now provisions
@@ -103,6 +115,7 @@ func main() {
 	go runMetricsCollector(ctx, metricsCollectInterval, registry, diskLog, offsetStore, recorder)
 	go runOffsetsCompactor(ctx, offsetsCompactInterval, offsetStore)
 	go runRetention(ctx, retentionCheckInterval, registry, diskLog, retentionMaxAge, retentionMaxBytes)
+	go runFlush(ctx, flushInterval, registry, diskLog)
 
 	log.Printf("kafka-go broker listening on %s, advertising %s:%d", listenAddr, self.Host, self.Port)
 	if err := broker.Serve(ctx, listenAddr, registry, brokers, diskLog, offsetStore, coord, recorder); err != nil {

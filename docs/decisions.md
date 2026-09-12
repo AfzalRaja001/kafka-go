@@ -714,3 +714,62 @@ Verified against a real running broker: started with `KAFKA_ADVERTISED_HOST=203.
 `KAFKA_ADVERTISED_PORT=9999` set, still bound to `:9092` locally, then queried it with franz-go's
 `kadm.ListBrokers` - the response reported `Host=203.0.113.10 Port=9999`, confirming the bind address and the
 advertised address are now genuinely independent.
+
+## 2026-09-12 - fsync policy (Phase 2 gap 1)
+
+`Segment.Sync()` existed and was correct since Phase 2, but nothing in the production code path ever called
+it - only tests did. Every write sat in the OS page cache until the OS decided to flush it on its own, so a
+machine-level crash (not just a process crash) could lose acknowledged writes. Real Kafka's own defaults for
+the two settings this maps to (`log.flush.interval.messages`, `log.flush.interval.ms`) are both effectively
+disabled, because Kafka's actual durability story is replication, not fsync - a write is safe once enough
+replicas have it, whether or not any of them has flushed it to disk yet. This project has no replication yet
+(`docs/plan.md`'s Phase 6, gated behind `v1.0-singlenode`), so an unflushed page-cache write here is the only
+copy of that data, full stop - matching real Kafka's disabled default would leave the project unable to make
+any durability claim at all, which was the whole point of closing this gap.
+
+Implemented both triggers real Kafka has, whichever fires first:
+
+- **Count-based**, inside `Partition.appendLocked`: a new `flushEveryMessages`/`sinceLastFlush` pair on
+  `Partition`, threaded through from `OpenPartition`/`NewDiskLog` the same way `segmentMaxBytes`/`indexEvery`
+  already are. Every append increments `sinceLastFlush`; once it reaches `flushEveryMessages`, the active
+  segment gets `Sync()`'d and the counter resets. `flushEveryMessages <= 0` disables this check entirely,
+  matching the `maxAge`/`maxBytes` zero-disables convention `ApplyRetention` already established.
+- **Roll-time**, also inside `appendLocked`: whenever a segment rolls (fills past `segmentMaxBytes`), the
+  outgoing segment is flushed unconditionally before the new one becomes active, regardless of
+  `sinceLastFlush`. A rolled segment gets no more `Append` calls ever again, so without this its own
+  count-based check would never get another chance to fire, and whatever landed in it since its last flush
+  would stay unflushed indefinitely.
+- **Time-based**, `Log`'s sixth deliberate extension: `Sync(topic, partition) error`. Covers the opposite
+  case from both triggers above - a partition too low-traffic to ever reach `flushEveryMessages` between
+  rolls. `DiskLog.Sync` delegates to a new `Partition.Sync()`; both are lenient about an unknown
+  topic-partition (return `nil`, not an error), matching `ApplyRetention`'s own reasoning: this is meant to
+  be called by a sweep across every known partition on a timer, and one racing with `DeleteTopics` shouldn't
+  be treated as a failure worth logging. Wired through a new `flushPartitions`/`runFlush` pair in
+  `cmd/broker/flush.go`, the same pure-function/ticker split `collectMetrics`/`applyRetention` already use for
+  independent unit-testability with fakes.
+
+Chose `flushEveryMessages = 1000` and `flushInterval = 5s` as defaults (whichever fires first) over matching
+real Kafka's disabled default, for the reason above - this bounds worst-case data loss on a machine crash to
+roughly 1000 records or 5 seconds of writes, without fsync-ing on every single append (which would tank
+throughput).
+
+Adding `flushEveryMessages` as a new constructor parameter on `OpenPartition`/`NewDiskLog` meant updating
+every existing call site across `internal/storage` and `internal/offsets`' test files - mechanical, since none
+of those tests care about the flush policy, so all of them pass `0` (disabled), preserving their exact
+pre-existing behavior.
+
+`Segment.Sync()`'s actual fsync syscall has no portable, fast way to observe from a unit test - it either
+succeeds silently or the append itself would already have failed. Testing therefore targets the triggering
+logic instead: white-box assertions on `sinceLastFlush` (already an established pattern in this file via
+`p.segments`/`p.nextOffset`) confirm the count-based threshold, the zero-disables case, and the unconditional
+roll-time reset each behave correctly, and `Partition.Sync()`/`DiskLog.Sync`/`FakeLog.Sync` each get their own
+delegation and leniency tests. `FakeLog.Sync` gained a small `syncCalls` counter purely for test
+observability, since it has no real segments to fsync and therefore no other side effect a broker-level test
+could check - mirrored on `TestApplyRetention_DeletesAcrossEveryKnownPartition`'s own use of a real side
+effect (`EarliestOffset` moving) to prove a sweep reached every known partition.
+
+Verified against a real running broker, with `flushEveryMessages` and `flushInterval` both temporarily
+shrunk (50 messages / 2s, reverted before this was written up) and run through `cmd/benchmark`: 48,027 records
+produced over 6 seconds (crossing the count threshold roughly 960 times, with several flush-ticker intervals
+elapsing too), all fetched back correctly, no errors in the broker log, and no meaningful throughput
+regression (8001 records/sec).

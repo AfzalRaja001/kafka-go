@@ -263,3 +263,32 @@ func TestFakeLog_EarliestOffsetUnknownPartitionErrors(t *testing.T) {
 		t.Fatal("expected an error for an unknown topic-partition, got nil")
 	}
 }
+
+func TestFakeLog_SyncCountsCallsPerTopicPartition(t *testing.T) {
+	log := NewFakeLog()
+
+	if err := log.Sync("orders", 0); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if err := log.Sync("orders", 0); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if err := log.Sync("orders", 1); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	if got := log.SyncCallCount("orders", 0); got != 2 {
+		t.Errorf("SyncCallCount(orders, 0) = %d, want 2", got)
+	}
+	if got := log.SyncCallCount("orders", 1); got != 1 {
+		t.Errorf("SyncCallCount(orders, 1) = %d, want 1", got)
+	}
+}
+
+func TestFakeLog_SyncUnknownPartitionIsNotAnError(t *testing.T) {
+	log := NewFakeLog()
+
+	if err := log.Sync("never-created", 0); err != nil {
+		t.Errorf("Sync on unknown topic-partition = %v, want nil", err)
+	}
+}

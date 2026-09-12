@@ -14,7 +14,7 @@ import (
 // Produce assign a baseOffset that collides with records already written.
 
 func TestPartition_MultiRecordBatchAdvancesOffsetBySpan(t *testing.T) {
-	p := openTestPartition(t, 1<<20, 5)
+	p := openTestPartition(t, 1<<20, 5, 0)
 	defer p.Close()
 
 	// One blob standing in for a 5-record batch.
@@ -48,7 +48,7 @@ func TestPartition_MultiRecordBatchAdvancesOffsetBySpan(t *testing.T) {
 // which is exactly what real Kafka does - the client discards records below
 // its fetch offset, the broker never splits a batch apart.
 func TestPartition_ReadResolvesOffsetInsideBatch(t *testing.T) {
-	p := openTestPartition(t, 1<<20, 5)
+	p := openTestPartition(t, 1<<20, 5, 0)
 	defer p.Close()
 
 	p.Append([]byte("first-batch"), 5, 1000)  // offsets 0-4
@@ -85,7 +85,7 @@ func TestPartition_ReadResolvesOffsetInsideBatch(t *testing.T) {
 func TestPartition_MultiRecordSpanSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
 
-	p1, err := OpenPartition(dir, 1<<20, 5)
+	p1, err := OpenPartition(dir, 1<<20, 5, 0)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestPartition_MultiRecordSpanSurvivesRestart(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	p2, err := OpenPartition(dir, 1<<20, 5)
+	p2, err := OpenPartition(dir, 1<<20, 5, 0)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestPartition_MultiRecordSpanSurvivesRestart(t *testing.T) {
 // correct across a segment roll, where offsets are tracked relative to each
 // segment's own base offset rather than the partition's.
 func TestPartition_MultiRecordAcrossSegments(t *testing.T) {
-	p := openTestPartition(t, 10, 1000) // tiny cap - every append rolls
+	p := openTestPartition(t, 10, 1000, 0) // tiny cap - every append rolls
 	defer p.Close()
 
 	bases := []int64{}
