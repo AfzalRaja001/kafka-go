@@ -124,7 +124,7 @@ func TestLogBackedStore_ReplaySeesEarlierCommits(t *testing.T) {
 func TestLogBackedStore_SurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
 
-	log := storage.NewDiskLog(dir, 1<<20, 5)
+	log := storage.NewDiskLog(dir, 1<<20, 5, 0)
 	store, err := NewLogBackedStore(log)
 	if err != nil {
 		t.Fatalf("NewLogBackedStore: %v", err)
@@ -138,7 +138,7 @@ func TestLogBackedStore_SurvivesRestart(t *testing.T) {
 
 	// Simulate a broker restart: a brand new DiskLog over the same
 	// directory, and a brand new LogBackedStore over that.
-	reopened := storage.NewDiskLog(dir, 1<<20, 5)
+	reopened := storage.NewDiskLog(dir, 1<<20, 5, 0)
 	defer reopened.Close()
 	restarted, err := NewLogBackedStore(reopened)
 	if err != nil {
@@ -174,7 +174,7 @@ func TestLogBackedStore_FetchAllReturnsEveryCommitForThatGroupOnly(t *testing.T)
 func TestLogBackedStore_FetchAllSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
 
-	log := storage.NewDiskLog(dir, 1<<20, 5)
+	log := storage.NewDiskLog(dir, 1<<20, 5, 0)
 	store, err := NewLogBackedStore(log)
 	if err != nil {
 		t.Fatalf("NewLogBackedStore: %v", err)
@@ -185,7 +185,7 @@ func TestLogBackedStore_FetchAllSurvivesRestart(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	reopened := storage.NewDiskLog(dir, 1<<20, 5)
+	reopened := storage.NewDiskLog(dir, 1<<20, 5, 0)
 	defer reopened.Close()
 	restarted, err := NewLogBackedStore(reopened)
 	if err != nil {
@@ -227,7 +227,7 @@ func TestLogBackedStore_GroupsReturnsEveryDistinctGroupThatHasEverCommitted(t *t
 func TestLogBackedStore_GroupsSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
 
-	log := storage.NewDiskLog(dir, 1<<20, 5)
+	log := storage.NewDiskLog(dir, 1<<20, 5, 0)
 	store, err := NewLogBackedStore(log)
 	if err != nil {
 		t.Fatalf("NewLogBackedStore: %v", err)
@@ -237,7 +237,7 @@ func TestLogBackedStore_GroupsSurvivesRestart(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	reopened := storage.NewDiskLog(dir, 1<<20, 5)
+	reopened := storage.NewDiskLog(dir, 1<<20, 5, 0)
 	defer reopened.Close()
 	restarted, err := NewLogBackedStore(reopened)
 	if err != nil {
@@ -325,7 +325,7 @@ func TestLogBackedStore_CompactPreservesEveryDistinctKey(t *testing.T) {
 func TestLogBackedStore_CompactThenRestartReplaysCorrectly(t *testing.T) {
 	dir := t.TempDir()
 
-	log := storage.NewDiskLog(dir, 1<<20, 5)
+	log := storage.NewDiskLog(dir, 1<<20, 5, 0)
 	store, err := NewLogBackedStore(log)
 	if err != nil {
 		t.Fatalf("NewLogBackedStore: %v", err)
@@ -342,7 +342,7 @@ func TestLogBackedStore_CompactThenRestartReplaysCorrectly(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	reopened := storage.NewDiskLog(dir, 1<<20, 5)
+	reopened := storage.NewDiskLog(dir, 1<<20, 5, 0)
 	defer reopened.Close()
 	restarted, err := NewLogBackedStore(reopened)
 	if err != nil {

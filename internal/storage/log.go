@@ -52,4 +52,15 @@ type Log interface {
 	// got deleted, leaving a real gap - the normal, expected shape of a
 	// Kafka log under retention, not something to work around.
 	ApplyRetention(topic string, partition int32, maxAge time.Duration, maxBytes int64, now time.Time) error
+
+	// Sync forces the active segment to disk. Append already does this on
+	// its own once a configurable per-partition message count is reached
+	// (and unconditionally whenever a segment rolls), which bounds worst-case
+	// data loss by volume; Sync exists so a background ticker can also bound
+	// it by time, for a partition too low-traffic to ever cross the message
+	// count on its own. A topic-partition the caller doesn't know about is
+	// not an error - like ApplyRetention, this is meant to be called by a
+	// sweep across every known partition on a timer, and one racing with
+	// DeleteTopics shouldn't be treated as a failure worth logging.
+	Sync(topic string, partition int32) error
 }

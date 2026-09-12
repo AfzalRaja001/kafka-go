@@ -37,15 +37,15 @@ they are useful framing when describing the project.
 |---|---|---|
 | 0 | Go ramp-up | Done |
 | 1 | Protocol: framing, codecs, ApiVersions, Metadata | Done |
-| 2 | Storage engine: segments, indexes, partitions, recovery | Done, **1 gap** (no fsync policy) |
+| 2 | Storage engine: segments, indexes, partitions, recovery | Done |
 | 3 | Produce, Fetch, ListOffsets, CreateTopics, DeleteTopics | Done, **1 gap** (`acks` ignored) |
 | 4 | Consumer groups + `__consumer_offsets` | Done |
 | 5 | Production polish | **Mostly done - 1 item left** |
 | 7 | Deploy | Partially done, **blocks v1.0** |
 | 6 | Replication (stretch) | Not started, gated |
 
-29 PRs merged, none open (this document's own gap 5 fix - the configurable
-advertised broker address - is the next one to open). All of
+30 PRs merged, none open (this document's own gap 1 fix - the fsync policy
+- is the next one to open). All of
 `go build ./... && go vet ./... && go test -race ./...` passes, and CI
 (`.github/workflows/ci.yml`) runs exactly that on every push and PR.
 
@@ -101,8 +101,9 @@ plus offset span) so a restart can rebuild `nextOffset` from the segment file
 alone, with no separate bookkeeping file.
 
 The `Log` interface was deliberately frozen and has been extended exactly
-five times, each with a documented reason: `recordCount` on `Append`,
-`CreatePartition`/`DeletePartition`, `Size`, `Compact`, and `ApplyRetention`.
+six times, each with a documented reason: `recordCount` on `Append`,
+`CreatePartition`/`DeletePartition`, `Size`, `Compact`, `ApplyRetention`,
+and `Sync`.
 
 Record batches are stored **verbatim**. Only the 61-byte batch header is
 parsed, to rewrite `baseOffset` and recompute the CRC-32C. This is the single
@@ -172,20 +173,14 @@ real ~1MB fetch of small records from ~5.68s down to ~200ms.
 These were found by auditing the code on 2026-09-09, not assumed. Each is
 small, real, and worth closing before calling the single-node broker done.
 
-### 1. No fsync policy at all (Phase 2)
+### 1. fsync policy - CLOSED (Phase 2)
 
-`Segment.Sync()` exists and is correct, but **nothing in the production code
-path ever calls it** - only tests do. Every write currently sits in the OS
-page cache until the OS decides to flush it, so a machine-level crash (not
-just a process crash) can lose acknowledged writes.
-
-The original plan called for exactly this: flush on a configurable policy
-(every N messages or every N milliseconds), not on every append, and document
-the durability/throughput tradeoff. That tradeoff is a strong interview
-talking point and right now the project cannot make the claim at all.
-
-**Work:** a flush policy on `Partition` (count-based and/or time-based),
-wired through `DiskLog`. Small. Pairs naturally with the config file.
+Shipped (2026-09-12): `Partition` now flushes its active segment on two independent triggers, whichever
+fires first - count-based (`flushEveryMessages`, checked on every `Append`) and time-based (`Log.Sync`, the
+interface's sixth extension, called by a new `runFlush` ticker). A segment roll also flushes the outgoing
+segment unconditionally, since it will never be appended to again. Defaults: 1000 messages / 5 seconds,
+deliberately not matching real Kafka's own effectively-disabled default, since this project has no
+replication yet to fall back on for durability. See the 2026-09-12 decisions entry for the full writeup.
 
 ### 2. `acks` is decoded but ignored (Phase 3)
 
@@ -266,9 +261,9 @@ before any distributed work starts.
 
 ### Step 1 - close the single-node gaps (~10-14 hrs)
 
-Priority order within the step (retention shipped ahead of this order as
-PR #30, and the advertised-host fix from Step 2 below also shipped early -
-both are struck from here, not re-listed):
+Priority order within the step (retention, the advertised-host fix from
+Step 2 below, and fsync all shipped ahead of this order - PRs #30-#32 - and
+are struck from here, not re-listed):
 
 1. **README + artifacts** (~4 hrs, Track A or either). Architecture diagram,
    Grafana screenshot, 60-second demo GIF of official Kafka tooling against
@@ -276,10 +271,9 @@ both are struck from here, not re-listed):
    do differently" section covering the deliberate scope cuts (no general
    compaction, no transactions, single-version APIs). Highest value per hour
    in the repo right now.
-2. **fsync policy** (~2-3 hrs, Track B). Gap 1.
-3. **`acks=0`** (~2 hrs, Track A). Gap 2.
-4. **Config file** (~2-3 hrs, either) - optional, but do it *before* 2/3 if
-   doing it at all, so those land as config instead of new constants.
+2. **`acks=0`** (~2 hrs, Track A). Gap 2.
+3. **Config file** (~2-3 hrs, either) - optional, but do it *before* 2 if
+   doing it at all, so it lands as config instead of a new constant.
 
 **Exit criteria:** a stranger can clone the repo, run one command, produce
 and consume with official Kafka tooling, and see a Grafana dashboard - all

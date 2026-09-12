@@ -8,9 +8,9 @@ import (
 	"time"
 )
 
-func openTestPartition(t *testing.T, segmentMaxBytes int64, indexEvery int32) *Partition {
+func openTestPartition(t *testing.T, segmentMaxBytes int64, indexEvery, flushEveryMessages int32) *Partition {
 	t.Helper()
-	p, err := OpenPartition(t.TempDir(), segmentMaxBytes, indexEvery)
+	p, err := OpenPartition(t.TempDir(), segmentMaxBytes, indexEvery, flushEveryMessages)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -18,7 +18,7 @@ func openTestPartition(t *testing.T, segmentMaxBytes int64, indexEvery int32) *P
 }
 
 func TestPartition_RoundTrip(t *testing.T) {
-	p := openTestPartition(t, 1<<20, 5) // large segmentMaxBytes - single segment for this test
+	p := openTestPartition(t, 1<<20, 5, 0) // large segmentMaxBytes - single segment for this test
 	defer p.Close()
 
 	for i := 0; i < 100; i++ {
@@ -45,7 +45,7 @@ func TestPartition_RoundTrip(t *testing.T) {
 }
 
 func TestPartition_IndexIsSparse(t *testing.T) {
-	p := openTestPartition(t, 1<<20, 10)
+	p := openTestPartition(t, 1<<20, 10, 0)
 	defer p.Close()
 
 	for i := 0; i < 100; i++ {
@@ -62,7 +62,7 @@ func TestPartition_IndexIsSparse(t *testing.T) {
 }
 
 func TestPartition_LookupOffsetByTimestamp(t *testing.T) {
-	p := openTestPartition(t, 1<<20, 10)
+	p := openTestPartition(t, 1<<20, 10, 0)
 	defer p.Close()
 
 	for i := 0; i < 100; i++ {
@@ -80,7 +80,7 @@ func TestPartition_LookupOffsetByTimestamp(t *testing.T) {
 }
 
 func TestPartition_CompactReplacesRecordsRenumberedFromZero(t *testing.T) {
-	p := openTestPartition(t, 1<<20, 5)
+	p := openTestPartition(t, 1<<20, 5, 0)
 	defer p.Close()
 
 	for i := 0; i < 10; i++ {
@@ -117,7 +117,7 @@ func TestPartition_CompactReplacesRecordsRenumberedFromZero(t *testing.T) {
 func TestPartition_CompactActuallyReclaimsDiskSpace(t *testing.T) {
 	// Tiny segmentMaxBytes forces several segment rolls, so this proves
 	// Compact cleans up every old segment file, not just the active one.
-	p := openTestPartition(t, 40, 1000)
+	p := openTestPartition(t, 40, 1000, 0)
 	defer p.Close()
 
 	for i := 0; i < 20; i++ {
@@ -155,7 +155,7 @@ func TestPartition_CompactActuallyReclaimsDiskSpace(t *testing.T) {
 }
 
 func TestPartition_CompactWithNoRecordsLeavesPartitionEmpty(t *testing.T) {
-	p := openTestPartition(t, 1<<20, 5)
+	p := openTestPartition(t, 1<<20, 5, 0)
 	defer p.Close()
 
 	p.Append([]byte("stale"), 1, 1000)
@@ -177,7 +177,7 @@ func TestPartition_CompactWithNoRecordsLeavesPartitionEmpty(t *testing.T) {
 // distinction OpenPartition's own restart-recovery logic exists to protect.
 func TestPartition_CompactSurvivesReopen(t *testing.T) {
 	dir := t.TempDir()
-	p, err := OpenPartition(dir, 1<<20, 5)
+	p, err := OpenPartition(dir, 1<<20, 5, 0)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestPartition_CompactSurvivesReopen(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	reopened, err := OpenPartition(dir, 1<<20, 5)
+	reopened, err := OpenPartition(dir, 1<<20, 5, 0)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestPartition_CompactSurvivesReopen(t *testing.T) {
 }
 
 func TestPartition_EarliestOffsetIsZeroBeforeAnyRetention(t *testing.T) {
-	p := openTestPartition(t, 1<<20, 5)
+	p := openTestPartition(t, 1<<20, 5, 0)
 	defer p.Close()
 
 	for i := 0; i < 5; i++ {
@@ -231,7 +231,7 @@ func backdateSegment(t *testing.T, dir string, base int64, oldTime time.Time) {
 }
 
 func TestPartition_ApplyRetention_DeletesExpiredSegmentsByTime(t *testing.T) {
-	p := openTestPartition(t, 40, 1000) // tiny segmentMaxBytes forces rolling
+	p := openTestPartition(t, 40, 1000, 0) // tiny segmentMaxBytes forces rolling
 	defer p.Close()
 
 	for i := 0; i < 20; i++ {
@@ -263,7 +263,7 @@ func TestPartition_ApplyRetention_DeletesExpiredSegmentsByTime(t *testing.T) {
 }
 
 func TestPartition_ApplyRetention_NeverDeletesTheActiveSegment(t *testing.T) {
-	p := openTestPartition(t, 1<<20, 5) // large segmentMaxBytes - single (active) segment
+	p := openTestPartition(t, 1<<20, 5, 0) // large segmentMaxBytes - single (active) segment
 	defer p.Close()
 
 	p.Append([]byte("record"), 1, 1000)
@@ -284,7 +284,7 @@ func TestPartition_ApplyRetention_NeverDeletesTheActiveSegment(t *testing.T) {
 }
 
 func TestPartition_ApplyRetention_ZeroMaxAgeDisablesTimeCheck(t *testing.T) {
-	p := openTestPartition(t, 40, 1000)
+	p := openTestPartition(t, 40, 1000, 0)
 	defer p.Close()
 
 	for i := 0; i < 20; i++ {
@@ -305,7 +305,7 @@ func TestPartition_ApplyRetention_ZeroMaxAgeDisablesTimeCheck(t *testing.T) {
 }
 
 func TestPartition_ApplyRetention_DeletesOldestSegmentsBySize(t *testing.T) {
-	p := openTestPartition(t, 40, 1000)
+	p := openTestPartition(t, 40, 1000, 0)
 	defer p.Close()
 
 	for i := 0; i < 20; i++ {
@@ -340,7 +340,7 @@ func TestPartition_ApplyRetention_DeletesOldestSegmentsBySize(t *testing.T) {
 // equivalent compaction test - the whole point is that deleted segment
 // files are gone from disk, not just unreferenced in memory.
 func TestPartition_ApplyRetention_ActuallyReclaimsDiskSpace(t *testing.T) {
-	p := openTestPartition(t, 40, 1000)
+	p := openTestPartition(t, 40, 1000, 0)
 	defer p.Close()
 
 	for i := 0; i < 20; i++ {
@@ -366,7 +366,7 @@ func TestPartition_ApplyRetention_ActuallyReclaimsDiskSpace(t *testing.T) {
 }
 
 func TestPartition_ApplyRetention_NoOpWhenNothingIsEligible(t *testing.T) {
-	p := openTestPartition(t, 1<<20, 5)
+	p := openTestPartition(t, 1<<20, 5, 0)
 	defer p.Close()
 
 	for i := 0; i < 5; i++ {
@@ -382,7 +382,7 @@ func TestPartition_ApplyRetention_NoOpWhenNothingIsEligible(t *testing.T) {
 }
 
 func TestPartition_ReadBatchWithinOneSegment(t *testing.T) {
-	p := openTestPartition(t, 1<<20, 5) // large segmentMaxBytes - single segment
+	p := openTestPartition(t, 1<<20, 5, 0) // large segmentMaxBytes - single segment
 	defer p.Close()
 
 	for i := 0; i < 10; i++ {
@@ -406,7 +406,7 @@ func TestPartition_ReadBatchStartsMidWindowUsesSparseIndexCorrectly(t *testing.T
 	// indexEvery=5 means offsets 0..9 span two sparse-index windows -
 	// starting the read partway through the second window is what exercises
 	// the "skip blobs before the target, then start accumulating" logic.
-	p := openTestPartition(t, 1<<20, 5)
+	p := openTestPartition(t, 1<<20, 5, 0)
 	defer p.Close()
 
 	for i := 0; i < 10; i++ {
@@ -424,7 +424,7 @@ func TestPartition_ReadBatchStartsMidWindowUsesSparseIndexCorrectly(t *testing.T
 }
 
 func TestPartition_ReadBatchRespectsMaxBytes(t *testing.T) {
-	p := openTestPartition(t, 1<<20, 5)
+	p := openTestPartition(t, 1<<20, 5, 0)
 	defer p.Close()
 
 	for i := 0; i < 10; i++ {
@@ -448,7 +448,7 @@ func TestPartition_ReadBatchRespectsMaxBytes(t *testing.T) {
 // over-budget blob - this must not change just because the accumulation
 // loop moved into Partition.
 func TestPartition_ReadBatchFirstBlobExceedsMaxBytesReturnsEmpty(t *testing.T) {
-	p := openTestPartition(t, 1<<20, 5)
+	p := openTestPartition(t, 1<<20, 5, 0)
 	defer p.Close()
 
 	p.Append([]byte("a-fairly-long-record"), 1, 1000)
@@ -463,7 +463,7 @@ func TestPartition_ReadBatchFirstBlobExceedsMaxBytesReturnsEmpty(t *testing.T) {
 }
 
 func TestPartition_ReadBatchCrossesSegments(t *testing.T) {
-	p := openTestPartition(t, 40, 1000) // tiny segmentMaxBytes forces rolling
+	p := openTestPartition(t, 40, 1000, 0) // tiny segmentMaxBytes forces rolling
 	defer p.Close()
 
 	for i := 0; i < 20; i++ {
@@ -487,7 +487,7 @@ func TestPartition_ReadBatchCrossesSegments(t *testing.T) {
 }
 
 func TestPartition_ReadBatchStartingMidwayThroughARolledSegment(t *testing.T) {
-	p := openTestPartition(t, 40, 1000)
+	p := openTestPartition(t, 40, 1000, 0)
 	defer p.Close()
 
 	for i := 0; i < 20; i++ {
@@ -516,7 +516,7 @@ func TestPartition_ReadBatchStartingMidwayThroughARolledSegment(t *testing.T) {
 // failure). ReadBatch itself owns that contract now that DiskLog.Read just
 // delegates straight to it.
 func TestPartition_ReadBatchOffsetOutOfRangeIsEmptyNotError(t *testing.T) {
-	p := openTestPartition(t, 1<<20, 5)
+	p := openTestPartition(t, 1<<20, 5, 0)
 	defer p.Close()
 
 	p.Append([]byte("only-record"), 1, 1000)
@@ -540,7 +540,7 @@ func TestPartition_ReadBatchOffsetOutOfRangeIsEmptyNotError(t *testing.T) {
 // The bound here is deliberately generous - not a tight benchmark, just a
 // tripwire against ever regressing back to quadratic behavior.
 func TestPartition_ReadBatchManyRecordsIsFast(t *testing.T) {
-	p := openTestPartition(t, 1<<24, 100) // matches production's real indexEvery
+	p := openTestPartition(t, 1<<24, 100, 0) // matches production's real indexEvery
 	defer p.Close()
 
 	const n = 5000
@@ -564,7 +564,7 @@ func TestPartition_ReadBatchManyRecordsIsFast(t *testing.T) {
 }
 
 func TestPartition_ConcurrentAppend_Safe(t *testing.T) {
-	p := openTestPartition(t, 1<<20, 5)
+	p := openTestPartition(t, 1<<20, 5, 0)
 	defer p.Close()
 
 	var wg sync.WaitGroup
@@ -598,7 +598,7 @@ func TestPartition_ConcurrentAppend_Safe(t *testing.T) {
 }
 
 func TestPartition_ConcurrentReadWrite(t *testing.T) {
-	p := openTestPartition(t, 1<<20, 5)
+	p := openTestPartition(t, 1<<20, 5, 0)
 	defer p.Close()
 
 	for i := 0; i < 20; i++ {
@@ -637,7 +637,7 @@ func TestPartition_RollsToNewSegment(t *testing.T) {
 	// Each record ("record-N") plus its 4-byte length prefix is at least
 	// 12 bytes - segmentMaxBytes of 10 guarantees every single append
 	// exceeds it, forcing a roll before every append after the first.
-	p := openTestPartition(t, 10, 1000)
+	p := openTestPartition(t, 10, 1000, 0)
 	defer p.Close()
 
 	for i := 0; i < 5; i++ {
@@ -672,7 +672,7 @@ func TestPartition_RollsToNewSegment(t *testing.T) {
 func TestPartition_ReopenAcrossMultipleSegments(t *testing.T) {
 	dir := t.TempDir()
 
-	p1, err := OpenPartition(dir, 10, 1000)
+	p1, err := OpenPartition(dir, 10, 1000, 0)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -684,7 +684,7 @@ func TestPartition_ReopenAcrossMultipleSegments(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	p2, err := OpenPartition(dir, 10, 1000)
+	p2, err := OpenPartition(dir, 10, 1000, 0)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -727,7 +727,7 @@ func TestPartition_ReopenAcrossMultipleSegments(t *testing.T) {
 func TestPartition_MultiSegmentCrashRecovery(t *testing.T) {
 	dir := t.TempDir()
 
-	p1, err := OpenPartition(dir, 10, 1000)
+	p1, err := OpenPartition(dir, 10, 1000, 0)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -753,7 +753,7 @@ func TestPartition_MultiSegmentCrashRecovery(t *testing.T) {
 	f.Write(tornHeader)
 	f.Close()
 
-	p2, err := OpenPartition(dir, 10, 1000) // Recover() runs automatically per segment
+	p2, err := OpenPartition(dir, 10, 1000, 0) // Recover() runs automatically per segment
 	if err != nil {
 		t.Fatalf("reopen after crash: %v", err)
 	}
@@ -785,5 +785,122 @@ func TestPartition_MultiSegmentCrashRecovery(t *testing.T) {
 	data, _, err := p2.Read(5)
 	if err != nil || string(data) != "record-5" {
 		t.Fatalf("read offset 5 after recovery: %q, %v, want \"record-5\"", data, err)
+	}
+}
+
+// TestPartition_FlushEveryMessagesTriggersAtThreshold pins down the
+// count-based half of the fsync policy: sinceLastFlush must reset to 0 the
+// moment it reaches flushEveryMessages, and keep counting normally below
+// that threshold. Segment.Sync()'s actual fsync syscall has no portable,
+// fast way to observe from a unit test (it either succeeds silently or the
+// append itself would have already failed) - this instead pins down the
+// triggering logic that decides when Sync gets called, which is the part
+// this change actually adds.
+func TestPartition_FlushEveryMessagesTriggersAtThreshold(t *testing.T) {
+	p := openTestPartition(t, 1<<20, 5, 3) // flush every 3 messages
+	defer p.Close()
+
+	for i := 0; i < 2; i++ {
+		if _, err := p.Append([]byte("r"), 1, 1000); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	if p.sinceLastFlush != 2 {
+		t.Fatalf("sinceLastFlush = %d after 2 appends, want 2 (below threshold)", p.sinceLastFlush)
+	}
+
+	if _, err := p.Append([]byte("r"), 1, 1000); err != nil {
+		t.Fatalf("append 3: %v", err)
+	}
+	if p.sinceLastFlush != 0 {
+		t.Fatalf("sinceLastFlush = %d after 3rd append, want 0 (threshold reached, flushed)", p.sinceLastFlush)
+	}
+
+	for i := 0; i < 2; i++ {
+		if _, err := p.Append([]byte("r"), 1, 1000); err != nil {
+			t.Fatalf("append after flush %d: %v", i, err)
+		}
+	}
+	if p.sinceLastFlush != 2 {
+		t.Fatalf("sinceLastFlush = %d after 2 more appends, want 2 (counting resumed from 0)", p.sinceLastFlush)
+	}
+}
+
+// TestPartition_FlushEveryMessagesZeroDisablesCountBasedFlush confirms 0
+// means "never flush on count alone" - matching maxAge/maxBytes's own 0-
+// disables convention on ApplyRetention, rather than "flush every 0
+// messages" (which would be nonsensical - it would have to mean every
+// single append, an entirely different policy from "disabled").
+func TestPartition_FlushEveryMessagesZeroDisablesCountBasedFlush(t *testing.T) {
+	p := openTestPartition(t, 1<<20, 5, 0)
+	defer p.Close()
+
+	for i := 0; i < 50; i++ {
+		if _, err := p.Append([]byte("r"), 1, 1000); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	if p.sinceLastFlush != 50 {
+		t.Fatalf("sinceLastFlush = %d after 50 appends with flush disabled, want 50 (never reset)", p.sinceLastFlush)
+	}
+}
+
+// TestPartition_RollingFlushesOutgoingSegmentRegardlessOfCount proves the
+// roll-time flush is unconditional: flushEveryMessages is set high enough
+// that count-based flushing alone would never trigger, yet a roll must
+// still flush the segment being retired, since it will never be appended to
+// again and therefore would otherwise sit unflushed forever.
+//
+// Every record is the same fixed 1-byte payload (9 bytes on disk once the
+// 8-byte header is added), so with segmentMaxBytes=20 the 4th append is the
+// first one where active.seg.Size() (27, after 3 appends) has crossed the
+// cap - a deterministic, exactly-once roll, rather than "at least 2
+// segments" the way Compact's own roll-forcing tests only need.
+func TestPartition_RollingFlushesOutgoingSegmentRegardlessOfCount(t *testing.T) {
+	p := openTestPartition(t, 20, 1000, 1000) // flush count never reached on its own
+	defer p.Close()
+
+	for i := 0; i < 4; i++ {
+		if _, err := p.Append([]byte("r"), 1, 1000); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	if len(p.segments) != 2 {
+		t.Fatalf("test setup: expected exactly 2 segments after the 4th append, got %d", len(p.segments))
+	}
+
+	// sinceLastFlush is reset to 0 by the roll, then immediately
+	// incremented by the append that triggered it - so 1, not 0, is what
+	// proves the roll-time reset actually ran rather than count-based
+	// flushing (which would need 1000 appends, far more than this test
+	// makes).
+	if p.sinceLastFlush != 1 {
+		t.Fatalf("sinceLastFlush = %d right after a roll, want 1 (reset by the roll, then incremented once)", p.sinceLastFlush)
+	}
+}
+
+// TestPartition_SyncFlushesActiveSegmentAndResetsCounter is the time-based
+// half of the fsync policy: an explicit Sync call (what cmd/broker's
+// runFlush ticker calls) must succeed and reset sinceLastFlush exactly like
+// a count-triggered flush would, so the two triggers stay consistent with
+// each other regardless of which one fires.
+func TestPartition_SyncFlushesActiveSegmentAndResetsCounter(t *testing.T) {
+	p := openTestPartition(t, 1<<20, 5, 1000) // count threshold never reached
+	defer p.Close()
+
+	for i := 0; i < 4; i++ {
+		if _, err := p.Append([]byte("r"), 1, 1000); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	if p.sinceLastFlush != 4 {
+		t.Fatalf("sinceLastFlush = %d before Sync, want 4", p.sinceLastFlush)
+	}
+
+	if err := p.Sync(); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if p.sinceLastFlush != 0 {
+		t.Fatalf("sinceLastFlush = %d after Sync, want 0", p.sinceLastFlush)
 	}
 }
