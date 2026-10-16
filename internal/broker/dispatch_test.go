@@ -329,6 +329,36 @@ func TestDispatch_RecordsMetricsForAFailedRequestUnderTheUnknownLabel(t *testing
 	}
 }
 
+// TestDispatch_RecoversFromHandlerPanic uses a nil registry to make
+// HandleMetadata dereference nil - a stand-in for any future handler bug.
+// The panic must come back as an ordinary error (which closes only this
+// one connection in handleConn), be recorded as a failed request, and never
+// unwind out of dispatch to take down every other client.
+func TestDispatch_RecoversFromHandlerPanic(t *testing.T) {
+	recorder := metrics.NewRecorder()
+	enc := encodeRequestHeader(protocol.ApiKeyMetadata, 1, 1, "kcat")
+	enc.Int32(-1) // null topics: "describe everything", which reads the registry
+	req := enc.Result()
+
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("panic escaped dispatch: %v", r)
+			}
+		}()
+		_, err = dispatch(req, nil, nil, storage.NewFakeLog(), group.NewInMemoryOffsetStore(), group.NewCoordinator(20*time.Millisecond), recorder)
+	}()
+
+	if err == nil || !strings.Contains(err.Error(), "panic") {
+		t.Fatalf("err = %v, want an error mentioning the recovered panic", err)
+	}
+	body := scrapeMetrics(t, recorder)
+	if !strings.Contains(body, `kafkago_requests_total{api_key="Metadata",result="error"} 1`) {
+		t.Errorf("recovered panic not recorded as a failed Metadata request:\n%s", body)
+	}
+}
+
 func TestDispatch_TruncatedRequest(t *testing.T) {
 	_, err := dispatch([]byte{0, 18}, protocol.NewTopicRegistry(), nil, storage.NewFakeLog(), group.NewInMemoryOffsetStore(), group.NewCoordinator(20*time.Millisecond), metrics.NewRecorder()) // only 2 bytes
 	if err == nil {

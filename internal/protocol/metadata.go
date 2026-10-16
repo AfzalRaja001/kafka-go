@@ -80,7 +80,7 @@ func (r *TopicRegistry) All() []*Topic {
 // state to track.
 func HandleMetadata(correlationID int32, requestBody []byte, registry *TopicRegistry, brokers []Broker) ([]byte, error) {
 	dec := NewDecoder(requestBody)
-	requestedTopics, err := dec.StringArray()
+	requestedTopics, err := dec.NullableStringArray()
 	if err != nil {
 		return nil, fmt.Errorf("metadata request: %w", err)
 	}

@@ -1,9 +1,58 @@
 package broker
 
 import (
+	"bytes"
+	"encoding/binary"
+	"errors"
 	"io"
+	"runtime"
 	"testing"
 )
+
+func frame(claimedSize uint32, body []byte) io.Reader {
+	return bytes.NewReader(append(binary.BigEndian.AppendUint32(nil, claimedSize), body...))
+}
+
+// TestReadMessage_RejectsFrameOverLimit: a length prefix over the cap is
+// refused from the 4 header bytes alone, before any body is read or any
+// memory is set aside for it.
+func TestReadMessage_RejectsFrameOverLimit(t *testing.T) {
+	for _, size := range []uint32{MaxRequestBytes + 1, 0x7FFFFFFF, 0xFFFFFFFF} {
+		_, err := ReadMessage(frame(size, nil))
+		if !errors.Is(err, ErrRequestTooLarge) {
+			t.Errorf("claimed size %d: err = %v, want ErrRequestTooLarge", size, err)
+		}
+	}
+}
+
+func TestReadMessage_FrameAtLimitAccepted(t *testing.T) {
+	body := bytes.Repeat([]byte("x"), 64)
+	msg, err := readMessage(frame(64, body), 64)
+	if err != nil || !bytes.Equal(msg, body) {
+		t.Fatalf("64-byte frame with a 64-byte limit = (%d bytes, %v), want the body back", len(msg), err)
+	}
+	if _, err := readMessage(frame(65, append(body, 'y')), 64); !errors.Is(err, ErrRequestTooLarge) {
+		t.Fatalf("65-byte frame with a 64-byte limit: err = %v, want ErrRequestTooLarge", err)
+	}
+}
+
+// TestReadMessage_AllocatesOnlyWhatActuallyArrives is the evaluation's
+// 6.2GB scenario from the inside: a frame claiming the full 100MB under the
+// cap, followed by only 10 real bytes, must cost roughly those 10 bytes of
+// memory - not the 100MB the client claimed.
+func TestReadMessage_AllocatesOnlyWhatActuallyArrives(t *testing.T) {
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	_, err := ReadMessage(frame(MaxRequestBytes, make([]byte, 10)))
+	runtime.ReadMemStats(&after)
+
+	if err != io.ErrUnexpectedEOF {
+		t.Fatalf("err = %v, want io.ErrUnexpectedEOF (10 of %d bytes arrived)", err, MaxRequestBytes)
+	}
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 1<<20 {
+		t.Fatalf("allocated %d bytes for a frame where only 10 body bytes arrived, want < 1MB", allocated)
+	}
+}
 
 func TestReadWriteMessage_RoundTrip(t *testing.T) {
 	r, w := io.Pipe()

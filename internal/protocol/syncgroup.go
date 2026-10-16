@@ -35,7 +35,7 @@ func DecodeSyncGroupRequest(buf []byte) (SyncGroupRequest, error) {
 		return SyncGroupRequest{}, fmt.Errorf("member_id: %w", err)
 	}
 
-	assignmentCount, err := dec.Int32()
+	assignmentCount, err := dec.NonNullArrayLen(6) // member_id + assignment length
 	if err != nil {
 		return SyncGroupRequest{}, fmt.Errorf("assignment count: %w", err)
 	}

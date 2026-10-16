@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/AfzalRaja001/kafka-go/internal/storage"
@@ -147,5 +148,46 @@ func TestHandleCreateTopics_InvalidPartitionsReturnsError(t *testing.T) {
 	}
 	if _, ok := registry.Get("orders"); ok {
 		t.Error("orders should not be registered after an invalid CreateTopics request")
+	}
+}
+
+// TestHandleCreateTopics_PartitionCountAboveCapRejected covers the
+// evaluation's num_partitions=2^31-1 crash: anything above the cap must be
+// refused before a single partition (or the slice describing them) is
+// created.
+func TestHandleCreateTopics_PartitionCountAboveCapRejected(t *testing.T) {
+	for _, n := range []int32{1001, 1 << 30, 2147483647} {
+		t.Run(fmt.Sprint(n), func(t *testing.T) {
+			registry := NewTopicRegistry()
+			log := storage.NewFakeLog()
+
+			resp, err := HandleCreateTopics(1, encodeCreateTopicsRequest("orders", n, 1), registry, log)
+			if err != nil {
+				t.Fatalf("HandleCreateTopics: %v", err)
+			}
+			if _, code := decodeCreateTopicsResponseOneTopic(t, resp); code != ErrInvalidPartitions {
+				t.Errorf("error_code = %d, want %d (INVALID_PARTITIONS)", code, ErrInvalidPartitions)
+			}
+			if _, err := log.LatestOffset("orders", 0); err == nil {
+				t.Error("partition 0 was created before the request was rejected")
+			}
+		})
+	}
+}
+
+func TestHandleCreateTopics_PartitionCountAtCapAccepted(t *testing.T) {
+	registry := NewTopicRegistry()
+	log := storage.NewFakeLog()
+
+	resp, err := HandleCreateTopics(1, encodeCreateTopicsRequest("orders", 1000, 1), registry, log)
+	if err != nil {
+		t.Fatalf("HandleCreateTopics: %v", err)
+	}
+	if _, code := decodeCreateTopicsResponseOneTopic(t, resp); code != ErrNone {
+		t.Fatalf("error_code = %d, want %d (NONE)", code, ErrNone)
+	}
+	topic, ok := registry.Get("orders")
+	if !ok || len(topic.Partitions) != 1000 {
+		t.Fatalf("registered topic = %v (ok=%v), want 1000 partitions", topic, ok)
 	}
 }

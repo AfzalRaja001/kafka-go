@@ -139,16 +139,78 @@ func (d *Decoder) Bytes() ([]byte, error) {
 	return v, nil
 }
 
-// StringArray decodes a 4-byte signed count followed by that many strings.
-func (d *Decoder) StringArray() ([]string, error) {
+// ArrayLen decodes an array's 4-byte signed count and checks it against the
+// bytes actually left in the buffer, before the caller allocates or loops
+// on it. minElemSize is the fewest bytes one element can possibly occupy
+// (2 for a string's length prefix, 16 for a Fetch partition's three fixed
+// fields, ...): a count whose elements couldn't fit even at that minimum
+// size is rejected here, so a 4-byte request can never make the broker
+// reserve memory for billions of elements that were never sent.
+//
+// -1 is returned as-is - it means "null" on the wire, and only the caller
+// knows whether this particular array is allowed to be null. Any other
+// negative count is always an error.
+func (d *Decoder) ArrayLen(minElemSize int) (int32, error) {
 	count, err := d.Int32()
 	if err != nil {
-		return nil, fmt.Errorf("array count: %w", err)
+		return 0, fmt.Errorf("array count: %w", err)
+	}
+	if count == -1 {
+		return -1, nil
 	}
 	if count < 0 {
+		return 0, fmt.Errorf("array count: invalid negative count %d", count)
+	}
+	// int64, so count * minElemSize can't overflow back into a small,
+	// plausible-looking number.
+	if int64(count)*int64(minElemSize) > int64(len(d.buf)-d.pos) {
+		return 0, fmt.Errorf("array count: %d elements of at least %d bytes each cannot fit in the %d bytes remaining: %w",
+			count, minElemSize, len(d.buf)-d.pos, ErrNotEnoughData)
+	}
+	return count, nil
+}
+
+// NonNullArrayLen is ArrayLen for arrays the protocol does not allow to be
+// null - which is every array except the few explicitly documented as
+// nullable (Metadata's and OffsetFetch's topic lists).
+func (d *Decoder) NonNullArrayLen(minElemSize int) (int32, error) {
+	count, err := d.ArrayLen(minElemSize)
+	if err != nil {
+		return 0, err
+	}
+	if count == -1 {
+		return 0, errors.New("array count: null (-1) is not allowed for this array")
+	}
+	return count, nil
+}
+
+// StringArray decodes a non-nullable array of strings - a 4-byte count
+// followed by that many strings. A null count is an error; see
+// NullableStringArray for the arrays where null is meaningful.
+func (d *Decoder) StringArray() ([]string, error) {
+	count, err := d.NonNullArrayLen(2)
+	if err != nil {
+		return nil, err
+	}
+	return d.stringArrayElements(count)
+}
+
+// NullableStringArray is StringArray for arrays where null means something
+// different from empty - Metadata's topic list, where null asks for every
+// topic and empty asks for none. Null returns a nil slice; empty returns a
+// non-nil empty one, so callers can tell the two apart.
+func (d *Decoder) NullableStringArray() ([]string, error) {
+	count, err := d.ArrayLen(2)
+	if err != nil {
+		return nil, err
+	}
+	if count == -1 {
 		return nil, nil
 	}
+	return d.stringArrayElements(count)
+}
 
+func (d *Decoder) stringArrayElements(count int32) ([]string, error) {
 	result := make([]string, 0, count)
 	for i := int32(0); i < count; i++ {
 		s, err := d.String()
