@@ -1,6 +1,10 @@
 package protocol
 
-import "testing"
+import (
+	"encoding/binary"
+	"math"
+	"testing"
+)
 
 func TestInt32(t *testing.T) {
 	tests := []struct {
@@ -221,6 +225,83 @@ func TestStringArray(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDecoder_ArrayLen(t *testing.T) {
+	tests := []struct {
+		name        string
+		count       int32
+		remaining   int
+		minElemSize int
+		want        int32
+		wantErr     bool
+	}{
+		{"null passes through as -1", -1, 0, 2, -1, false},
+		{"empty", 0, 0, 2, 0, false},
+		{"fits exactly", 3, 6, 2, 3, false},
+		{"fits with room to spare", 2, 100, 4, 2, false},
+		{"one element more than could fit", 4, 6, 2, 0, true},
+		{"negative other than -1", -2, 10, 2, 0, true},
+		{"maxint32 with almost nothing behind it", math.MaxInt32, 10, 1, 0, true},
+		// count * minElemSize must not overflow into a small number and
+		// sneak past the check.
+		{"multiplication would overflow int32", 1 << 30, 64, 16, 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := binary.BigEndian.AppendUint32(nil, uint32(tt.count))
+			buf = append(buf, make([]byte, tt.remaining)...)
+			dec := NewDecoder(buf)
+
+			got, err := dec.ArrayLen(tt.minElemSize)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Errorf("count = %d, want %d", got, tt.want)
+			}
+			if !tt.wantErr && len(dec.Remaining()) != tt.remaining {
+				t.Errorf("consumed %d bytes beyond the count itself", tt.remaining-len(dec.Remaining()))
+			}
+		})
+	}
+}
+
+func TestDecoder_ArrayLen_TruncatedCount(t *testing.T) {
+	if _, err := NewDecoder([]byte{0, 0}).ArrayLen(1); err == nil {
+		t.Fatal("expected an error for a 2-byte count, got nil")
+	}
+}
+
+func TestStringArray_RejectsNull(t *testing.T) {
+	enc := NewEncoder()
+	enc.Int32(-1)
+	if _, err := NewDecoder(enc.Result()).StringArray(); err == nil {
+		t.Fatal("non-nullable StringArray accepted a null (-1) count")
+	}
+}
+
+func TestNullableStringArray(t *testing.T) {
+	enc := NewEncoder()
+	enc.Int32(-1)
+	got, err := NewDecoder(enc.Result()).NullableStringArray()
+	if err != nil || got != nil {
+		t.Fatalf("null = (%v, %v), want (nil, nil)", got, err)
+	}
+
+	enc = NewEncoder()
+	enc.StringArray([]string{})
+	got, err = NewDecoder(enc.Result()).NullableStringArray()
+	if err != nil || got == nil || len(got) != 0 {
+		t.Fatalf("empty = (%#v, %v), want a non-nil empty slice - empty must stay distinguishable from null", got, err)
+	}
+
+	enc = NewEncoder()
+	enc.StringArray([]string{"a", "b"})
+	got, err = NewDecoder(enc.Result()).NullableStringArray()
+	if err != nil || len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Fatalf("two elements = (%v, %v)", got, err)
 	}
 }
 

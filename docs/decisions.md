@@ -773,3 +773,66 @@ shrunk (50 messages / 2s, reverted before this was written up) and run through `
 produced over 6 seconds (crossing the count threshold roughly 960 times, with several flush-ticker intervals
 elapsing too), all fetched back correctly, no errors in the broker log, and no meaningful throughput
 regression (8001 records/sec).
+
+## 2026-10-13 - Request hardening: never trust a size the client sent
+
+A full end-to-end evaluation (recorded in `docs/plan.md`, "Found by the 2026-10-13 evaluation") found that four
+requests of 4 to 7 bytes each could crash the whole broker, and that 12 bytes over three connections pushed it
+from 53MB to 6.2GB of memory. All four bugs had one root cause: a number taken straight off the wire - an array
+count, `num_partitions`, a frame length - was used to size memory before the broker had any evidence the client
+was telling the truth.
+
+**Array counts.** Three decoders pre-sized a slice with `make(..., 0, count)` from the client's count, so a
+4-byte `Metadata` body claiming 2^31-1 topics made Go try to allocate 27GB and die with `fatal error: out of
+memory`; an `OffsetFetch` count of -5 panicked in `makeslice`. The other array counts were only looped over and
+failed safely when the bytes ran out, but treated any negative count as "zero items" instead of an error. Every
+array count now goes through `Decoder.ArrayLen(minElemSize)`, which rejects any negative other than -1 and any
+count whose elements could not fit in the bytes actually remaining even at their smallest possible size - the
+same check real Kafka's own decoder makes. `minElemSize` is the sum of each element's fixed-size fields (2 for a
+string, 16 for a Fetch partition); the product is computed in int64 so a huge count cannot overflow back into a
+plausible one. `NonNullArrayLen` adds the rule that -1 (null) is only legal where the protocol says so: only
+`Metadata`'s and `OffsetFetch`'s topic lists, where null means "all topics". `StringArray` was split the same
+way `String`/`NullableString` already were - `StringArray` (non-nullable, `DeleteTopics`) and
+`NullableStringArray` (`Metadata`) - so the distinction is visible at the call site rather than buried in a
+comment.
+
+Alternative rejected: only removing the three pre-sizing calls. It would have stopped the crashes with a smaller
+diff, but left the 15 array counts across 10 request types with three different ideas of what a bad count means.
+
+**`num_partitions`** is capped at `MaxPartitionsPerTopic = 1000`, returning `INVALID_PARTITIONS` (37) like any
+other out-of-range value. Real Kafka has no hard per-topic cap, but each partition here is a directory plus three
+open file handles, and a stock Linux shell allows a process only 1024 - the VPS deployment would hit that long
+before memory. 1000 is still generous: real Kafka's guidance is a few thousand partitions per broker in total.
+
+**Panic recovery.** Nothing in the broker called `recover()`, so a panic in any handler unwound out of that
+connection's goroutine and killed the process - one bad request disconnected every client. `dispatch` now defers
+a `recover()` that logs the stack, turns the panic into an ordinary error (so `handleConn` closes just that
+connection), and records the request as a failure in metrics. It is registered after the metrics defer on
+purpose: deferred calls run last-in-first-out, so it converts the panic into `err` before the recorder reads
+`err`. `dispatch`'s storage parameter was renamed `log` -> `diskLog` to free the name for the `log` package -
+the same name `server.go` already used for it. This is deliberately a safety net, not error handling: a panic
+inside a held lock (the group coordinator, say) leaves that lock held, and `recover()` cannot catch the
+runtime's `fatal error: out of memory` at all - which is why the actual fix for the crashes is the bounds above,
+and recovery is only the backstop for bugs not found yet.
+
+**Frame size.** `ReadMessage` allocated the full claimed length - up to 4GiB - before reading one body byte. It
+now rejects any frame over `MaxRequestBytes` (100MB, real Kafka's `socket.request.max.bytes` default) from the
+4 header bytes alone, returning `ErrRequestTooLarge` and closing the connection, since the announced body is
+still in flight and there is no way to find the next frame boundary. Below the cap, the body buffer starts at no
+more than 64KB and grows only as bytes actually arrive (`bytes.Buffer.ReadFrom` over an `io.LimitReader`), so a
+client that announces 99MB and sends nothing costs almost nothing. The cap alone was rejected as insufficient:
+each connection could still make the broker reserve 100MB with 4 bytes, and 60 connections would reproduce the
+6.2GB result. `ReadMessage` keeps its signature and wraps an unexported `readMessage(r, limit)` so tests can
+exercise the boundary with 64-byte frames instead of 100MB ones.
+
+Testing followed the usual RED-then-GREEN order, with one deliberate exception: the 2^31-1 cases could not be
+run against the old code, because they really would allocate tens of gigabytes and kill the test process - that
+being the bug. RED for those was confirmed through the safe cases (35 negative/null counts accepted, the -5
+panic, `num_partitions=1001` accepted, the panic escaping `dispatch`) and the new helpers failing to compile.
+`TestDecoders_RejectHostileArrayCounts` replays 71 hostile counts across every array in every decoder, and a
+paired control test rebuilds each body with count 0 and requires it to decode cleanly - the first draft passed
+some cases for the wrong reason (the body ended before a trailing `timeout_ms`, so decoding failed there instead
+of at the count), and the control makes that class of mistake fail loudly. Verified against a real running
+broker with the evaluation harness: all four crash/exhaustion scenarios now pass (three 2GiB claims: 51MB ->
+51MB, previously 53MB -> 6.2GB; 4,200 fuzz requests with zero panics, previously ~90 crashes), and every
+scenario that passed before still passes.

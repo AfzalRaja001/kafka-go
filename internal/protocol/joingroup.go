@@ -41,7 +41,7 @@ func DecodeJoinGroupRequest(buf []byte) (JoinGroupRequest, error) {
 		return JoinGroupRequest{}, fmt.Errorf("protocol_type: %w", err)
 	}
 
-	protocolCount, err := dec.Int32()
+	protocolCount, err := dec.NonNullArrayLen(6) // name + metadata length
 	if err != nil {
 		return JoinGroupRequest{}, fmt.Errorf("protocol count: %w", err)
 	}

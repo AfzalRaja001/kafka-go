@@ -42,7 +42,7 @@ func DecodeProduceRequest(buf []byte) (ProduceRequest, error) {
 		return ProduceRequest{}, fmt.Errorf("timeout_ms: %w", err)
 	}
 
-	topicCount, err := dec.Int32()
+	topicCount, err := dec.NonNullArrayLen(6) // topic name + partition count
 	if err != nil {
 		return ProduceRequest{}, fmt.Errorf("topic count: %w", err)
 	}
@@ -53,7 +53,7 @@ func DecodeProduceRequest(buf []byte) (ProduceRequest, error) {
 		if err != nil {
 			return ProduceRequest{}, fmt.Errorf("topic %d name: %w", i, err)
 		}
-		partCount, err := dec.Int32()
+		partCount, err := dec.NonNullArrayLen(8) // partition + records length
 		if err != nil {
 			return ProduceRequest{}, fmt.Errorf("topic %d partition count: %w", i, err)
 		}

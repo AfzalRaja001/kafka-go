@@ -37,7 +37,7 @@ func DecodeOffsetFetchRequest(buf []byte) (OffsetFetchRequest, error) {
 		return OffsetFetchRequest{}, fmt.Errorf("group_id: %w", err)
 	}
 
-	topicCount, err := dec.Int32()
+	topicCount, err := dec.ArrayLen(6) // topic name + partition count; null allowed (v2)
 	if err != nil {
 		return OffsetFetchRequest{}, fmt.Errorf("topic count: %w", err)
 	}
@@ -51,7 +51,7 @@ func DecodeOffsetFetchRequest(buf []byte) (OffsetFetchRequest, error) {
 		if err != nil {
 			return OffsetFetchRequest{}, fmt.Errorf("topic %d name: %w", i, err)
 		}
-		partCount, err := dec.Int32()
+		partCount, err := dec.NonNullArrayLen(4) // partition
 		if err != nil {
 			return OffsetFetchRequest{}, fmt.Errorf("topic %d partition count: %w", i, err)
 		}

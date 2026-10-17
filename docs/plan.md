@@ -44,8 +44,8 @@ they are useful framing when describing the project.
 | 7 | Deploy | Partially done, **blocks v1.0** |
 | 6 | Replication (stretch) | Not started, gated |
 
-30 PRs merged, none open (this document's own gap 1 fix - the fsync policy
-- is the next one to open). All of
+31 PRs merged, none open (request hardening - evaluation bugs 1-4 below -
+is the next one to open). All of
 `go build ./... && go vet ./... && go test -race ./...` passes, and CI
 (`.github/workflows/ci.yml`) runs exactly that on every push and PR.
 
@@ -251,6 +251,61 @@ currently the single highest-value-per-hour gap in the whole repo.
 
 ---
 
+## Found by the 2026-10-13 evaluation
+
+A full end-to-end evaluation against a real running broker - 23 scenarios
+with franz-go, raw-TCP malformed input, 4,200 random-body fuzz requests,
+kill -9 crash recovery, plus a short-interval build for retention and
+compaction - found eleven bugs the unit tests had not. Everything a
+well-behaved client does worked, including 0 acknowledged records lost across
+a kill -9 mid-produce. What failed was the broker's trust in what clients
+send, and topic metadata across restarts.
+
+**Crash and resource exhaustion from tiny requests - CLOSED (2026-10-13):**
+
+1. Array counts were trusted: a 4-byte `Metadata`/`DeleteTopics` body with
+   count 2^31-1 crashed the broker out of memory, and an `OffsetFetch` count
+   of -5 panicked it. Fixed with `Decoder.ArrayLen`, which checks every count
+   against the bytes actually remaining before anything is allocated.
+2. `CreateTopics` `num_partitions` = 2^31-1 crashed the broker. Capped at
+   `MaxPartitionsPerTopic` (1000).
+3. No panic recovery: one handler panic killed every client's connection.
+   `dispatch` now recovers, logs the stack, and closes only that connection.
+4. Frame size was unbounded: three connections sending a 4-byte length
+   prefix each pushed the broker from 53MB to 6.2GB. Capped at 100MB, and
+   the body buffer now grows only as bytes actually arrive.
+
+**Topic registry - open, blocks `v1.0-singlenode`:**
+
+5. Topics vanish from `Metadata` after every restart. The registry is
+   in-memory only; data and committed offsets survive on disk, but normal
+   clients can no longer reach them. Any restart of a deployed broker would
+   look like total data loss to its clients.
+6. Topic names are not validated - `../escape` created a directory outside
+   the data folder (path traversal); `..`, `a/b`, spaces and 250-character
+   names are all accepted, where real Kafka rejects them.
+7. Produce never checks that the topic or partition exists: writes to a
+   never-created topic, partition 7 of a 1-partition topic, or partition -1
+   all succeed and create hidden directories.
+
+**Record batch validation - open:**
+
+8. The batch header is trusted: a corrupted payload is accepted and its CRC
+   recomputed (laundering the corruption); two concatenated batches leave the
+   partition unreadable for normal consumers; a 1-record batch claiming 1000
+   records creates 999 phantom offsets.
+
+**Fetch semantics - open:**
+
+9. A record larger than the consumer's per-partition fetch size is never
+   delivered and no error is returned - the consumer stalls silently.
+10. Fetching past the log end long-polls then returns success instead of
+    `OFFSET_OUT_OF_RANGE`, so a consumer with a stale offset never resets.
+11. One idle partition delays data already available on another by up to the
+    full `max_wait` (3.5-5s observed with franz-go's defaults).
+
+---
+
 ## Remaining work, in the order to do it
 
 The original plan numbered Deploy as Phase 7 but gated Phase 6 behind "Phase
@@ -265,14 +320,18 @@ Priority order within the step (retention, the advertised-host fix from
 Step 2 below, and fsync all shipped ahead of this order - PRs #30-#32 - and
 are struck from here, not re-listed):
 
-1. **README + artifacts** (~4 hrs, Track A or either). Architecture diagram,
+1. **Topic registry** (evaluation bugs 5-7). Ahead of everything else:
+   until topics survive a restart, any deployed broker loses every topic the
+   first time it restarts.
+2. **README + artifacts** (~4 hrs, Track A or either). Architecture diagram,
    Grafana screenshot, 60-second demo GIF of official Kafka tooling against
    the broker, real benchmark numbers from `cmd/benchmark`, and a "what I'd
    do differently" section covering the deliberate scope cuts (no general
    compaction, no transactions, single-version APIs). Highest value per hour
    in the repo right now.
-2. **`acks=0`** (~2 hrs, Track A). Gap 2.
-3. **Config file** (~2-3 hrs, either) - optional, but do it *before* 2 if
+3. **Record batch validation and fetch semantics** (evaluation bugs 8-11).
+4. **`acks=0`** (~2 hrs, Track A). Gap 2.
+5. **Config file** (~2-3 hrs, either) - optional, but do it *before* 4 if
    doing it at all, so it lands as config instead of a new constant.
 
 **Exit criteria:** a stranger can clone the repo, run one command, produce

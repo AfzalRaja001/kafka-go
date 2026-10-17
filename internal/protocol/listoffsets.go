@@ -41,7 +41,7 @@ func DecodeListOffsetsRequest(buf []byte) (ListOffsetsRequest, error) {
 		return ListOffsetsRequest{}, fmt.Errorf("replica_id: %w", err)
 	}
 
-	topicCount, err := dec.Int32()
+	topicCount, err := dec.NonNullArrayLen(6) // topic name + partition count
 	if err != nil {
 		return ListOffsetsRequest{}, fmt.Errorf("topic count: %w", err)
 	}
@@ -52,7 +52,7 @@ func DecodeListOffsetsRequest(buf []byte) (ListOffsetsRequest, error) {
 		if err != nil {
 			return ListOffsetsRequest{}, fmt.Errorf("topic %d name: %w", i, err)
 		}
-		partCount, err := dec.Int32()
+		partCount, err := dec.NonNullArrayLen(12) // partition + timestamp
 		if err != nil {
 			return ListOffsetsRequest{}, fmt.Errorf("topic %d partition count: %w", i, err)
 		}

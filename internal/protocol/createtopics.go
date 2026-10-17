@@ -28,7 +28,7 @@ type CreateTopicsRequest struct {
 func DecodeCreateTopicsRequest(buf []byte) (CreateTopicsRequest, error) {
 	dec := NewDecoder(buf)
 
-	topicCount, err := dec.Int32()
+	topicCount, err := dec.NonNullArrayLen(16) // name + num_partitions + replication_factor + 2 array counts
 	if err != nil {
 		return CreateTopicsRequest{}, fmt.Errorf("topic count: %w", err)
 	}
@@ -48,7 +48,7 @@ func DecodeCreateTopicsRequest(buf []byte) (CreateTopicsRequest, error) {
 			return CreateTopicsRequest{}, fmt.Errorf("topic %d replication_factor: %w", i, err)
 		}
 
-		assignmentCount, err := dec.Int32()
+		assignmentCount, err := dec.NonNullArrayLen(8) // partition_index + broker count
 		if err != nil {
 			return CreateTopicsRequest{}, fmt.Errorf("topic %d assignment count: %w", i, err)
 		}
@@ -56,7 +56,7 @@ func DecodeCreateTopicsRequest(buf []byte) (CreateTopicsRequest, error) {
 			if _, err := dec.Int32(); err != nil { // partition_index
 				return CreateTopicsRequest{}, fmt.Errorf("topic %d assignment %d partition_index: %w", i, j, err)
 			}
-			brokerCount, err := dec.Int32()
+			brokerCount, err := dec.NonNullArrayLen(4) // broker id
 			if err != nil {
 				return CreateTopicsRequest{}, fmt.Errorf("topic %d assignment %d broker count: %w", i, j, err)
 			}
@@ -67,7 +67,7 @@ func DecodeCreateTopicsRequest(buf []byte) (CreateTopicsRequest, error) {
 			}
 		}
 
-		configCount, err := dec.Int32()
+		configCount, err := dec.NonNullArrayLen(4) // name length + value length
 		if err != nil {
 			return CreateTopicsRequest{}, fmt.Errorf("topic %d config count: %w", i, err)
 		}
@@ -118,6 +118,16 @@ func HandleCreateTopics(correlationID int32, requestBody []byte, registry *Topic
 	return enc.Result(), nil
 }
 
+// MaxPartitionsPerTopic caps num_partitions on a single CreateTopics topic.
+// Real Kafka has no hard per-topic cap, but on this broker every partition
+// is a directory plus three open file handles (.log, .index, .timeindex),
+// so an uncapped request could exhaust the process's file-handle limit - a
+// stock Linux shell allows only 1024 - or, at 2^31-1, crash the broker
+// outright allocating the partition list. 1000 is generous for a single
+// node: real Kafka's own guidance is a few thousand partitions per broker
+// in total, across every topic.
+const MaxPartitionsPerTopic = 1000
+
 // createOneTopic provisions a single requested topic, or reports why it
 // couldn't. It only registers the topic after every partition is
 // successfully created - a partial failure partway through leaves orphaned
@@ -127,7 +137,7 @@ func createOneTopic(registry *TopicRegistry, log storage.Log, req CreateTopicsTo
 	if _, exists := registry.Get(req.Name); exists {
 		return ErrTopicAlreadyExists
 	}
-	if req.NumPartitions < 1 {
+	if req.NumPartitions < 1 || req.NumPartitions > MaxPartitionsPerTopic {
 		return ErrInvalidPartitions
 	}
 

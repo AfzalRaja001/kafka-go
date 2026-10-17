@@ -43,7 +43,7 @@ func DecodeFetchRequest(buf []byte) (FetchRequest, error) {
 		return FetchRequest{}, fmt.Errorf("min_bytes: %w", err)
 	}
 
-	topicCount, err := dec.Int32()
+	topicCount, err := dec.NonNullArrayLen(6) // topic name + partition count
 	if err != nil {
 		return FetchRequest{}, fmt.Errorf("topic count: %w", err)
 	}
@@ -54,7 +54,7 @@ func DecodeFetchRequest(buf []byte) (FetchRequest, error) {
 		if err != nil {
 			return FetchRequest{}, fmt.Errorf("topic %d name: %w", i, err)
 		}
-		partCount, err := dec.Int32()
+		partCount, err := dec.NonNullArrayLen(16) // partition + fetch_offset + max_bytes
 		if err != nil {
 			return FetchRequest{}, fmt.Errorf("topic %d partition count: %w", i, err)
 		}

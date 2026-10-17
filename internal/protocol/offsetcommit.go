@@ -31,7 +31,7 @@ func DecodeOffsetCommitRequest(buf []byte) (OffsetCommitRequest, error) {
 		return OffsetCommitRequest{}, fmt.Errorf("group_id: %w", err)
 	}
 
-	topicCount, err := dec.Int32()
+	topicCount, err := dec.NonNullArrayLen(6) // topic name + partition count
 	if err != nil {
 		return OffsetCommitRequest{}, fmt.Errorf("topic count: %w", err)
 	}
@@ -42,7 +42,7 @@ func DecodeOffsetCommitRequest(buf []byte) (OffsetCommitRequest, error) {
 		if err != nil {
 			return OffsetCommitRequest{}, fmt.Errorf("topic %d name: %w", i, err)
 		}
-		partCount, err := dec.Int32()
+		partCount, err := dec.NonNullArrayLen(14) // partition + offset + metadata length
 		if err != nil {
 			return OffsetCommitRequest{}, fmt.Errorf("topic %d partition count: %w", i, err)
 		}
