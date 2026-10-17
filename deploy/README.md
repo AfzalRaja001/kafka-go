@@ -29,14 +29,28 @@ context), which takes a minute or so; later runs reuse the cached layers.
    (`prometheus/prometheus.yml`), matching the broker's own metrics
    collection interval.
 
+   Starting is slow the first time: Docker pulls the images, and Grafana runs
+   its database migrations on first boot, which took about 8 minutes on a
+   laptop with a SATA SSD. Grafana's database is not kept in a volume, so it
+   does this again whenever the container is recreated (every `docker compose
+   down` followed by `up`). `docker compose stop` and `docker compose start`
+   keep the container, and its database, so they are quick.
+
+The Docker broker's raw `/metrics` is published on http://localhost:9102
+(port 9101 inside the container). It is deliberately not 9101: that port is
+what a natively-run broker uses, and Prometheus's `host.docker.internal:9101`
+target would otherwise reach the container a second time and count every
+metric twice.
+
 ## Running the broker natively instead
 
 If you'd rather run the broker with `go run ./cmd/broker` (the faster loop
 for day-to-day dev) and only use Docker for Prometheus + Grafana, that still
 works: `prometheus.yml` scrapes both the compose broker and
-`host.docker.internal`, and whichever one is actually running answers - the
-other just shows as a down target in Prometheus's own target list
-(http://localhost:9090/targets), which is harmless.
+`host.docker.internal:9101`, and whichever one is actually running answers -
+the other just shows as a down target in Prometheus's own target list
+(http://localhost:9090/targets), which is harmless. This is why the compose
+broker's metrics are on host port 9102 and not 9101.
 
 ## Stop it
 
@@ -46,7 +60,10 @@ docker compose down
 
 Prometheus and Grafana still start fresh each time (no dashboards/alerts to
 lose - they're provisioned from files, not clicked together). The broker's
-own data - topics, records, committed consumer offsets - persists in a named
+own data - records and committed consumer offsets - persists in a named
 volume (`broker-data`) across `docker compose down`/`up`, matching how the
-native `go run ./cmd/broker` workflow already behaves. To wipe it and start
-over: `docker compose down -v`.
+native `go run ./cmd/broker` workflow already behaves. One catch: the broker
+does not yet rebuild its list of topics from disk on startup (see
+`docs/plan.md`, evaluation bug 5), so after a restart, clients see no topics
+until they are created again. To wipe the data and start over:
+`docker compose down -v`.

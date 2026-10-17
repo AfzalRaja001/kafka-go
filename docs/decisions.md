@@ -836,3 +836,53 @@ of at the count), and the control makes that class of mistake fail loudly. Verif
 broker with the evaluation harness: all four crash/exhaustion scenarios now pass (three 2GiB claims: 51MB ->
 51MB, previously 53MB -> 6.2GB; 4,200 fuzz requests with zero panics, previously ~90 crashes), and every
 scenario that passed before still passes.
+
+## 2026-10-17 - The README, what verifying it found, and a double-counting bug in the Docker stack
+
+The root README was nine lines, and `docs/plan.md` calls it the highest-value gap in the repo: the project exists
+to be evaluated by someone who has never seen it. The rewrite is a full project README (pitch, status, a verified
+Quickstart, architecture, storage, observability, benchmarks, configuration, known limitations, what I would do
+differently, future work) rather than a short README pointing into `docs/`, because a stranger should not have to
+click through to find out why the project is interesting. The architecture diagram is Mermaid in the README, not an
+exported image: GitHub renders it natively, it diffs in pull requests, and there is no binary to go stale as the
+code changes. It is laid out top-down, because the first draft (left to right) was eight boxes wide and would have
+shrunk to unreadable on GitHub. The Team section was left out, as chosen.
+
+**Every claim in the README was checked against something that was actually run.** That meant downloading the
+official Apache Kafka 3.9.1 command-line tools (122MB, checksum verified against Apache's published value, kept
+outside the repo) and running them against the broker, which had never been done: only franz-go and kafka-python
+had. Result: topics create/list/delete, console producer, console consumer (with and without a group, resuming from
+the committed offset) and the producer perf tool all work; `kafka-topics --describe` (needs `DescribeConfigs`),
+`kafka-consumer-groups --list/--describe` (need `ListGroups`/`DescribeGroups`) and `kafka-get-offsets` (needs
+Metadata v4+) fail; and the Java producer only works with `enable.idempotence=false`, because Kafka 3.x clients
+enable idempotence by default and send `InitProducerId`, which the broker does not implement. The README documents
+the working commands, the required flags and a compatibility table of exactly these results, instead of claiming
+broad compatibility. These are missing APIs, not regressions, so they are recorded in `docs/plan.md`, not fixed
+here.
+
+**Benchmark numbers are reported with what they do and do not measure.** `cmd/benchmark` sends one record per
+request and waits for each acknowledgement, so its produce rows measure round-trip latency across four producers:
+the official batching perf tool did 50,556 records/sec on the same broker against the benchmark's 11,216. Fetch for
+a multi-partition topic did not finish within the benchmark's 30-second cap, and one franz-go consumer reading the
+same 3-partition topic took 7.2s with the default 5s fetch wait against 2.1s with a 100ms wait: that is evaluation
+bug 11 (one idle partition delays the others by a full max-wait). Those rows are left out and the README says why,
+instead of reporting a capacity figure the bug distorts. Hardware (i7-8550U laptop, client and broker on the same
+machine, single 10-second runs) is stated beside the table.
+
+**The screenshot exposed a real bug, which is fixed here** (`docs/issues.md` entry 12). `prometheus.yml` scrapes
+`broker:9101` and `host.docker.internal:9101`, assuming only one is ever running. But `docker-compose.yml`
+published the container's 9101 on the host's 9101, so the second target reached the same container: the dashboard's
+`sum(kafkago_requests_total)` read 1,722 against the broker's own 861, and every partition appeared twice. Chosen
+fix: publish the container's metrics on host port 9102, so host 9101 is free for a native broker and the
+"only one target is ever up" assumption becomes true. Rejected: dropping the published metrics port entirely
+(cleanest, but the distroless image has no shell, so the metrics could then no longer be inspected from the host),
+and de-duplicating in the dashboard queries with `max by (...)` (touches eight panels and leaves two targets
+scraping one broker). Verified against the live stack: the native-broker target shows down, the dashboard-style sum
+equals the broker's total, one series per partition.
+
+Smaller findings recorded in `deploy/README.md` and the compose file: Grafana's database is not in a volume, so
+every recreated container re-runs its first-boot migrations (about 8 minutes on the test laptop, with the first
+start also pulling images), while `docker compose stop`/`start` keeps the container and restarts in 4 seconds (both
+measured); and the compose file's claim that topics survive a restart was wrong while bug 5 is open, so the comment
+and the deploy README now say record data and offsets persist but topics must be created again. The screenshot is
+a 1600x1000 PNG taken with headless Edge, because the in-app browser pane only produces 800x550 images.
