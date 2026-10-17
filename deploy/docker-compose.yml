@@ -5,7 +5,9 @@
 # compose up` for the dashboard stack) still works too: prometheus.yml scrapes
 # both this compose broker and host.docker.internal, and whichever one is
 # actually running answers - the other just shows as a down target in
-# Prometheus, which is harmless. See docs/decisions.md for the reasoning.
+# Prometheus, which is harmless. That only holds because the container's
+# metrics are published on host port 9102 rather than 9101 (see the broker's
+# ports below). See docs/decisions.md for the reasoning.
 #
 # Usage, from this directory:
 #   docker compose up
@@ -19,12 +21,23 @@ services:
       dockerfile: deploy/Dockerfile
     ports:
       - "9092:9092"
-      - "9101:9101"
+      # The broker's /metrics is 9101 inside the container but published on
+      # host port 9102, not 9101. Prometheus scrapes broker:9101 over
+      # Docker's internal network and does not need a published port. If this
+      # were "9101:9101", prometheus.yml's second target
+      # (host.docker.internal:9101, meant for a natively-run broker) would
+      # reach this same container through the published port, every metric
+      # would be scraped twice, and the dashboard's sum() panels would read
+      # exactly double. Keeping 9101 free on the host is what makes "only one
+      # of the two targets is ever up" actually true.
+      - "9102:9101"
     volumes:
-      # Named volume, not a bind mount: topics and committed offsets survive
-      # `docker compose down`/`up` and container restarts, matching how the
-      # native `go run ./cmd/broker` workflow already behaves (its own
-      # ./data directory persists on disk between runs).
+      # Named volume, not a bind mount: record data and committed offsets
+      # survive `docker compose down`/`up` and container restarts, matching
+      # how the native `go run ./cmd/broker` workflow already behaves (its own
+      # ./data directory persists on disk between runs). The topic list itself
+      # is held in memory and is not rebuilt on startup yet (docs/plan.md,
+      # evaluation bug 5), so topics must be created again after a restart.
       - broker-data:/app/data
 
   prometheus:

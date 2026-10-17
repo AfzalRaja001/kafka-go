@@ -263,3 +263,26 @@ The most serious bug so far - a silent data-corruption path, not a crash.
   Real Kafka keeping them as genuinely separate broker-side vs. client-side
   settings was a design decision worth understanding before reusing one
   field for two purposes.
+
+## 12. Every metric in the Docker stack was counted twice
+
+- **Symptom:** found while capturing the README's Grafana screenshot. The
+  dashboard's own `sum(kafkago_requests_total)` read 1,722 while the broker's
+  `/metrics` reported 861, so the request-rate and bytes-rate panels read
+  exactly double, and every partition appeared twice in "Partition sizes" and
+  "Consumer group lag".
+- **Root cause:** `prometheus.yml` scrapes two targets, `broker:9101` (the
+  compose broker) and `host.docker.internal:9101` (a broker run natively),
+  on the assumption that only one of them is ever running. But the compose
+  file published the container's port 9101 on the host's port 9101, so
+  `host.docker.internal:9101` reached the same container through its own
+  published port. Prometheus held two copies of every series (different
+  `instance` labels) and every `sum()` panel added them together.
+- **Fix:** publish the container's metrics on host port 9102 (`9102:9101`),
+  keeping host port 9101 free for a native broker. Afterwards the
+  `host.docker.internal:9101` target is down, the dashboard-style sum equals
+  the broker's own total (861 and 861), and each partition appears once.
+- **Caught by:** comparing one dashboard number against the broker's own
+  `/metrics` while preparing a screenshot. No unit test can see this, because
+  it only exists in the real Compose stack. Panels that fill in with data
+  are not the same as panels that are correct.

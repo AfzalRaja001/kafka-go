@@ -8,6 +8,9 @@ scrape_configs:
       # service (Docker's internal DNS resolves the service name); host.
       # docker.internal is a broker run natively via `go run ./cmd/broker`.
       # Only one is ever actually running at a time - the other just shows
-      # as a down target in Prometheus, which is harmless. 9101 is
+      # as a down target in Prometheus, which is harmless. That depends on
+      # docker-compose.yml publishing the container's metrics on host port
+      # 9102, not 9101: otherwise host.docker.internal:9101 would reach the
+      # compose broker too and every metric would be counted twice. 9101 is
       # metricsAddr in cmd/broker/main.go.
       - targets: ["broker:9101", "host.docker.internal:9101"]

@@ -44,8 +44,8 @@ they are useful framing when describing the project.
 | 7 | Deploy | Partially done, **blocks v1.0** |
 | 6 | Replication (stretch) | Not started, gated |
 
-31 PRs merged, none open (request hardening - evaluation bugs 1-4 below -
-is the next one to open). All of
+32 PRs merged, none open (the README and artifacts work is the next one to
+open). All of
 `go build ./... && go vet ./... && go test -race ./...` passes, and CI
 (`.github/workflows/ci.yml`) runs exactly that on every push and PR.
 
@@ -304,6 +304,30 @@ send, and topic metadata across restarts.
 11. One idle partition delays data already available on another by up to the
     full `max_wait` (3.5-5s observed with franz-go's defaults).
 
+**Found while verifying the README (2026-10-17) - open:**
+
+12. **Official Kafka tooling needs APIs the broker does not implement.**
+    Tested with the Apache Kafka 3.9.1 command-line tools: `kafka-topics
+    --describe` needs `DescribeConfigs`; `kafka-consumer-groups --list` and
+    `--describe` need `ListGroups` and `DescribeGroups`; `kafka-get-offsets`
+    needs Metadata v4+; and the Java producer fails by default because Kafka
+    3.x clients enable idempotence, which sends `InitProducerId`. Today a
+    stranger following the Quickstart must pass
+    `--producer-property enable.idempotence=false` or the producer errors.
+    Cheapest wins for the demo: `ListGroups` and `DescribeGroups` (the
+    standard way to look at consumer lag) and a minimal `InitProducerId`
+    that hands out producer IDs, so default producers work with no flag.
+13. **The repository has no `LICENSE` file** although it is public, so nobody
+    has the right to reuse it. Needs a decision (MIT is the usual choice for
+    a project like this).
+14. **Grafana's database is not in a Compose volume**, so every recreated
+    container repeats its first-boot migrations (about 8 minutes on the test
+    laptop). One named volume for `/var/lib/grafana` would fix it.
+
+The Docker stack's double-counting of every metric (found while capturing the
+screenshot) is fixed in the same change, not left open: see `docs/issues.md`
+entry 12.
+
 ---
 
 ## Remaining work, in the order to do it
@@ -323,12 +347,12 @@ are struck from here, not re-listed):
 1. **Topic registry** (evaluation bugs 5-7). Ahead of everything else:
    until topics survive a restart, any deployed broker loses every topic the
    first time it restarts.
-2. **README + artifacts** (~4 hrs, Track A or either). Architecture diagram,
-   Grafana screenshot, 60-second demo GIF of official Kafka tooling against
-   the broker, real benchmark numbers from `cmd/benchmark`, and a "what I'd
-   do differently" section covering the deliberate scope cuts (no general
-   compaction, no transactions, single-version APIs). Highest value per hour
-   in the repo right now.
+2. **README + artifacts** (~4 hrs, Track A or either). DONE except the demo
+   GIF (2026-10-17): full README with a verified Quickstart, a Mermaid
+   architecture diagram, a Grafana screenshot, real benchmark numbers, known
+   limitations and a "what I'd do differently" section. The 60-second demo
+   GIF of official Kafka tooling is recorded by hand and added when it exists
+   (`docs/assets/demo.gif`).
 3. **Record batch validation and fetch semantics** (evaluation bugs 8-11).
 4. **`acks=0`** (~2 hrs, Track A). Gap 2.
 5. **Config file** (~2-3 hrs, either) - optional, but do it *before* 4 if
