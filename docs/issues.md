@@ -335,3 +335,57 @@ The most serious bug so far - a silent data-corruption path, not a crash.
 - **Lesson:** when a value becomes configurable, grep for the literal it
   replaced. The default (1) hid the bug because every test and every normal
   run used the default.
+
+## 15. A topic name could point outside the data directory
+
+- **Symptom:** found by the 2026-10-13 evaluation. `CreateTopics` for a topic
+  called `../escape` succeeded and created a directory next to the data
+  directory, outside it. `..`, `a/b`, a name with a space and a 250-character
+  name were all accepted too.
+- **Root cause:** the topic name was never checked anywhere. A partition lives
+  in a directory called `<topic>-<partition>` inside the data directory, so the
+  name was joined straight into a file path. `/` and `..` let a client choose
+  where on disk the broker creates (and later, on `DeleteTopics`, removes)
+  directories.
+- **Fix:** `ValidateTopicName` applies Kafka's own rules: 1 to 249 characters,
+  only ASCII letters, digits, `.`, `_` and `-`, and not exactly `.` or `..`.
+  `CreateTopics` runs it first and answers `INVALID_TOPIC_EXCEPTION` (17)
+  before anything touches the registry or the disk. The loader for
+  `topics.json` runs the same check, because a hand-edited file would
+  otherwise carry the same hole in through startup (verified live: a file
+  naming `../evil` stops the broker with exit code 1).
+- **Caught by:** the evaluation harness (scenario 02). A unit test now creates
+  topics named `../escape`, `../../escape` and `sub/dir` against a real
+  on-disk log and fails on any entry created anywhere in the test directory.
+- **Lesson:** anything a client sends that becomes part of a file path is a
+  path-traversal bug until proven otherwise. Validate it at the boundary with
+  an allowlist of characters, not a blocklist of bad ones.
+
+## 16. Producing to a topic or partition that did not exist created it silently
+
+- **Symptom:** found by the 2026-10-13 evaluation. A Produce to a topic nobody
+  had created, to partition 7 of a 1-partition topic, or to partition -1 all
+  succeeded. Each left a hidden partition directory that Metadata did not
+  list, that the saved topic list did not contain (so it was ignored after a
+  restart), and that a public server would let any stranger create without
+  limit.
+- **Root cause:** `HandleProduce` only received the storage log, not the topic
+  registry, so it had nothing to check against. It treated "storage has no such
+  partition" as "start at offset 0", and storage creates a partition on the
+  first append.
+- **Fix:** `HandleProduce` now receives the registry (passed through `dispatch`
+  like `CreateTopics` and `Metadata` already do). For each partition it checks
+  that the topic exists and that `0 <= partition < partition count`; if not,
+  that partition's result is `UNKNOWN_TOPIC_OR_PARTITION` (3) with base offset
+  -1 and nothing is written. The error is per partition, so a request
+  mixing good and bad partitions still writes the good ones. A partition that
+  the registry lists but storage lacks is now a server error (and is logged),
+  not a silent create. Error results also report base offset -1 consistently
+  (the corrupt-batch path used to say 0).
+- **Caught by:** the evaluation harness (scenario 08). Unit tests cover unknown
+  topic, partition equal to the count, far above it, negative, the extreme
+  int32 values, an empty and a path-like topic name, a deleted topic, and a
+  mixed request.
+- **Lesson:** if a layer creates things on first use, every caller that can
+  reach it must say whether creating is allowed. Here the answer was in the
+  registry, which the handler never saw.

@@ -139,6 +139,11 @@ const MaxPartitionsPerTopic = 1000
 // reported as created once it would survive a restart. If that save fails
 // the create fails with it, leaving the same harmless orphaned directories.
 func createOneTopic(registry *TopicRegistry, diskLog storage.Log, req CreateTopicsTopicRequest) int16 {
+	// First, before anything touches the registry or the disk: the name
+	// becomes part of a file path (see ValidateTopicName).
+	if err := ValidateTopicName(req.Name); err != nil {
+		return ErrInvalidTopic
+	}
 	if _, exists := registry.Get(req.Name); exists {
 		return ErrTopicAlreadyExists
 	}

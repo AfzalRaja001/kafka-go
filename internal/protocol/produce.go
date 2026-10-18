@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -87,9 +88,16 @@ func DecodeProduceRequest(buf []byte) (ProduceRequest, error) {
 var produceMu sync.Mutex
 
 // HandleProduce builds a Produce v3 response body, appending each
-// partition's record batch to log after rewriting its baseOffset and CRC
+// partition's record batch to diskLog after rewriting its baseOffset and CRC
 // to match the offset actually assigned.
-func HandleProduce(correlationID int32, requestBody []byte, log storage.Log) ([]byte, error) {
+//
+// A topic and partition must already exist in registry, i.e. have been made
+// by CreateTopics. Anything else is answered per partition with
+// UNKNOWN_TOPIC_OR_PARTITION and nothing is written: storage creates a
+// partition on first append, so without this check a typo in a client, or a
+// hostile one, would silently create hidden directories the registry (and so
+// Metadata and the topic list saved across restarts) knows nothing about.
+func HandleProduce(correlationID int32, requestBody []byte, registry *TopicRegistry, diskLog storage.Log) ([]byte, error) {
 	req, err := DecodeProduceRequest(requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("produce request: %w", err)
@@ -103,8 +111,16 @@ func HandleProduce(correlationID int32, requestBody []byte, log storage.Log) ([]
 		enc.String(topic.Topic)
 		enc.Int32(int32(len(topic.Partitions)))
 
+		meta, topicExists := registry.Get(topic.Topic)
+
 		for _, part := range topic.Partitions {
-			baseOffset, logAppendTime, errorCode := produceOne(log, topic.Topic, part.Partition, part.Records)
+			var baseOffset, logAppendTime int64
+			var errorCode int16
+			if !topicExists || part.Partition < 0 || int(part.Partition) >= len(meta.Partitions) {
+				baseOffset, logAppendTime, errorCode = -1, -1, ErrUnknownTopicOrPartition
+			} else {
+				baseOffset, logAppendTime, errorCode = produceOne(diskLog, topic.Topic, part.Partition, part.Records)
+			}
 			enc.Int32(part.Partition)
 			enc.Int16(errorCode)
 			enc.Int64(baseOffset)
@@ -116,21 +132,23 @@ func HandleProduce(correlationID int32, requestBody []byte, log storage.Log) ([]
 	return enc.Result(), nil
 }
 
-func produceOne(log storage.Log, topic string, partition int32, records []byte) (baseOffset, logAppendTime int64, errorCode int16) {
+func produceOne(diskLog storage.Log, topic string, partition int32, records []byte) (baseOffset, logAppendTime int64, errorCode int16) {
 	header, err := ParseRecordBatchHeader(records)
 	if err != nil {
-		return 0, -1, ErrCorruptMessage
+		return -1, -1, ErrCorruptMessage
 	}
 
 	produceMu.Lock()
 	defer produceMu.Unlock()
 
-	offset, err := log.LatestOffset(topic, partition)
+	// HandleProduce has already established the registry lists this
+	// partition, so storage lacking it is the broker's fault, not the
+	// client's (ensureStorage repairs that state at startup). Report it
+	// instead of letting Append quietly create the partition.
+	offset, err := diskLog.LatestOffset(topic, partition)
 	if err != nil {
-		// Doesn't exist yet - Append (below) creates it fresh via
-		// DiskLog's auto-create-on-write behavior, and a fresh partition
-		// always starts at offset 0. See the produceMu doc comment.
-		offset = 0
+		log.Printf("produce: %s-%d is registered but missing in storage: %v", topic, partition, err)
+		return -1, -1, ErrUnknownServerError
 	}
 
 	patched := RewriteRecordBatch(records, offset)
@@ -140,9 +158,9 @@ func produceOne(log storage.Log, topic string, partition int32, records []byte) 
 	// batch: under-reporting it would make the *next* produce peek a stale
 	// LatestOffset and assign a baseOffset colliding with records this batch
 	// already owns.
-	assignedOffset, err := log.Append(topic, partition, patched, header.RecordCount)
+	assignedOffset, err := diskLog.Append(topic, partition, patched, header.RecordCount)
 	if err != nil {
-		return 0, -1, ErrUnknownServerError
+		return -1, -1, ErrUnknownServerError
 	}
 
 	return assignedOffset, time.Now().UnixMilli(), ErrNone

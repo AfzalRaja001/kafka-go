@@ -260,9 +260,8 @@ This is an honest list of what does not work yet. Items marked with a bug number
 [docs/plan.md](docs/plan.md) under "Found by the 2026-10-13 evaluation".
 
 - **Single node, no replication.** One broker, one copy of the data.
-- **Topic names are not validated** (bug 6), and Produce does not check that the topic or partition exists
-  (bug 7). Do not expose the broker to untrusted clients.
-- **No authentication or encryption.** There is no SASL and no TLS.
+- **No authentication or encryption.** There is no SASL and no TLS, so do not expose the broker to untrusted
+  clients.
 - **Record batches are only checked at the header** (bug 8): a corrupted payload is accepted, and a request
   carrying several batches is not handled correctly.
 - **Fetch has two rough edges** (bugs 9 to 11): a record larger than the consumer's per-partition fetch size

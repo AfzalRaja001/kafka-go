@@ -20,6 +20,14 @@ func encodeProduceRequest(acks int16, timeoutMs int32, topic string, partition i
 	return enc.Result()
 }
 
+// newProduceLog returns a FakeLog holding the one partition of "orders" that
+// registryWithTopic("orders", 1) lists, the state CreateTopics leaves behind.
+func newProduceLog() *storage.FakeLog {
+	log := storage.NewFakeLog()
+	log.CreatePartition("orders", 0)
+	return log
+}
+
 func TestDecodeProduceRequest(t *testing.T) {
 	records := buildTestBatch(0, 2, []byte("fake-records"))
 	body := encodeProduceRequest(1, 5000, "orders", 3, records)
@@ -47,11 +55,11 @@ func TestDecodeProduceRequest(t *testing.T) {
 }
 
 func TestHandleProduce_Success(t *testing.T) {
-	log := storage.NewFakeLog()
+	log := newProduceLog()
 	records := buildTestBatch(0, 2, []byte("fake-records"))
 	body := encodeProduceRequest(1, 5000, "orders", 0, records)
 
-	resp, err := HandleProduce(42, body, log)
+	resp, err := HandleProduce(42, body, registryWithTopic("orders", 1), log)
 	if err != nil {
 		t.Fatalf("HandleProduce: %v", err)
 	}
@@ -82,13 +90,13 @@ func TestHandleProduce_Success(t *testing.T) {
 }
 
 func TestHandleProduce_SecondAppendGetsNextOffset(t *testing.T) {
-	log := storage.NewFakeLog()
+	log := newProduceLog()
 
 	produceOnceExpectOffset := func(want int64) {
 		t.Helper()
 		records := buildTestBatch(0, 1, []byte("r"))
 		body := encodeProduceRequest(1, 5000, "orders", 0, records)
-		resp, err := HandleProduce(1, body, log)
+		resp, err := HandleProduce(1, body, registryWithTopic("orders", 1), log)
 		if err != nil {
 			t.Fatalf("HandleProduce: %v", err)
 		}
@@ -110,12 +118,12 @@ func TestHandleProduce_SecondAppendGetsNextOffset(t *testing.T) {
 }
 
 func TestHandleProduce_CorruptMagicRejectedPerPartition(t *testing.T) {
-	log := storage.NewFakeLog()
+	log := newProduceLog()
 	records := buildTestBatch(0, 1, nil)
 	records[16] = 1 // wrong magic
 
 	body := encodeProduceRequest(1, 5000, "orders", 0, records)
-	resp, err := HandleProduce(1, body, log)
+	resp, err := HandleProduce(1, body, registryWithTopic("orders", 1), log)
 	if err != nil {
 		t.Fatalf("HandleProduce returned a Go error for a per-partition problem: %v", err)
 	}
@@ -133,13 +141,14 @@ func TestHandleProduce_CorruptMagicRejectedPerPartition(t *testing.T) {
 }
 
 func TestHandleProduce_RewritesBaseOffsetInStoredBytes(t *testing.T) {
-	log := storage.NewFakeLog()
+	log := newProduceLog()
+	registry := registryWithTopic("orders", 1)
 
 	first := buildTestBatch(0, 1, []byte("r0"))
-	HandleProduce(1, encodeProduceRequest(1, 5000, "orders", 0, first), log)
+	HandleProduce(1, encodeProduceRequest(1, 5000, "orders", 0, first), registry, log)
 
 	second := buildTestBatch(0, 1, []byte("r1")) // client always sends baseOffset 0
-	HandleProduce(1, encodeProduceRequest(1, 5000, "orders", 0, second), log)
+	HandleProduce(1, encodeProduceRequest(1, 5000, "orders", 0, second), registry, log)
 
 	// Read the second batch back directly from storage and confirm the
 	// durable bytes really were patched to baseOffset 1, not just that the

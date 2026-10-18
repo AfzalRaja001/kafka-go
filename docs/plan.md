@@ -44,8 +44,8 @@ they are useful framing when describing the project.
 | 7 | Deploy | Partially done, **blocks v1.0** |
 | 6 | Replication (stretch) | Not started, gated |
 
-33 PRs merged, none open (persistent topics, below, is the next one to
-open). All of
+34 PRs merged, none open (topic name validation and the Produce existence
+check, below, is the next one to open). All of
 `go build ./... && go vet ./... && go test -race ./...` passes, and CI
 (`.github/workflows/ci.yml`) runs exactly that on every push and PR.
 
@@ -292,14 +292,23 @@ send, and topic metadata across restarts.
    registry now builds leader, replicas and ISR from the configured node ID.
    See `docs/issues.md` entry 14.
 
-**Still open, and now the next blockers for `v1.0-singlenode`:**
-
-6. Topic names are not validated - `../escape` created a directory outside
-   the data folder (path traversal); `..`, `a/b`, spaces and 250-character
-   names are all accepted, where real Kafka rejects them.
-7. Produce never checks that the topic or partition exists: writes to a
-   never-created topic, partition 7 of a 1-partition topic, or partition -1
-   all succeed and create hidden directories.
+6. **CLOSED (2026-10-18).** Topic names were not validated: `../escape`
+   created a directory outside the data folder (path traversal), and `..`,
+   `a/b`, spaces and 250-character names were all accepted. `CreateTopics`
+   now applies Kafka's own rules (ASCII letters, digits, `.`, `_`, `-`; 1 to
+   249 characters; not `.` or `..`) and answers `INVALID_TOPIC_EXCEPTION`
+   (17); the topics file loader applies the same rule, so a hand-edited file
+   cannot smuggle a bad name in. See `docs/issues.md` entry 15.
+7. **CLOSED (2026-10-18).** Produce never checked that the topic or partition
+   exists, so a write to a never-created topic, partition 7 of a 1-partition
+   topic, or partition -1 silently created hidden directories that the
+   registry did not know about. Produce now checks the registry and answers
+   `UNKNOWN_TOPIC_OR_PARTITION` (3) per partition, writing nothing. See
+   `docs/issues.md` entry 16. Not done, deliberately (Produce only): Fetch and
+   ListOffsets already answer 3 for a partition storage lacks, but
+   OffsetCommit and OffsetFetch accept any topic name without consulting the
+   registry, and storage still creates a partition on first append (the
+   protocol layer is now the only caller that can reach that path).
 
 **Record batch validation - open:**
 
@@ -357,10 +366,9 @@ Priority order within the step (retention, the advertised-host fix from
 Step 2 below, and fsync all shipped ahead of this order - PRs #30-#32 - and
 are struck from here, not re-listed):
 
-1. **Topic registry, remaining half** (evaluation bugs 6-7: topic name
-   validation and the Produce existence check). Bug 5, topics surviving a
-   restart, is done (2026-10-17). These two matter more on a public server,
-   where strangers can reach the path traversal.
+1. **Topic registry** (evaluation bugs 5-7). DONE: topics survive a restart
+   (2026-10-17), topic names are validated and Produce checks that the topic
+   and partition exist (2026-10-18).
 2. **README + artifacts** (~4 hrs, Track A or either). DONE except the demo
    GIF (2026-10-17): full README with a verified Quickstart, a Mermaid
    architecture diagram, a Grafana screenshot, real benchmark numbers, known

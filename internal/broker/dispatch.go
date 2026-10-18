@@ -72,7 +72,7 @@ func dispatch(msg []byte, registry *protocol.TopicRegistry, brokers []protocol.B
 	case protocol.ApiKeyMetadata:
 		return protocol.HandleMetadata(correlationID, dec.Remaining(), registry, brokers)
 	case protocol.ApiKeyProduce:
-		return protocol.HandleProduce(correlationID, dec.Remaining(), diskLog)
+		return protocol.HandleProduce(correlationID, dec.Remaining(), registry, diskLog)
 	case protocol.ApiKeyFetch:
 		return protocol.HandleFetch(correlationID, dec.Remaining(), diskLog)
 	case protocol.ApiKeyListOffsets:
