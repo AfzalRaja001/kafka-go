@@ -293,6 +293,13 @@ This is an honest list of what does not work yet. Items marked with a bug number
   change rewrites everything while holding the registry lock, and an append-only log of changes would scale
   better. Replication will also need real cluster metadata, which is a different problem from this file.
 
+## Deploying it yourself
+
+[docs/deployment.md](docs/deployment.md) is a step-by-step runbook for putting the broker on a free Oracle Cloud
+VM with a public address: account and VM setup, firewall, the two scripts in [scripts/](scripts/), and how to
+check it from outside. The production Compose file ([deploy/prod/](deploy/prod/)) publishes only the Kafka port;
+metrics, Prometheus and Grafana stay on the VM's loopback and are reached through an SSH tunnel.
+
 ## Future work
 
 Deliberately out of scope for now: transactions and exactly-once semantics, tiered storage, general per-topic
@@ -311,8 +318,9 @@ internal/storage  segments, indexes, partitions, DiskLog, retention
 internal/group    consumer group coordinator
 internal/offsets  committed offsets stored in __consumer_offsets
 internal/metrics  Prometheus recorder
-deploy/           Dockerfile, Compose stack, Prometheus and Grafana config
-docs/             build plan, decision log, issue log, working conventions
+deploy/           Dockerfile, local Compose stack, production Compose stack (deploy/prod), Prometheus and Grafana config
+scripts/          VM setup and redeploy scripts
+docs/             build plan, decision log, issue log, deployment runbook, working conventions
 ```
 
 ## Development

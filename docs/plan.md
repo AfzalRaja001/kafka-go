@@ -344,7 +344,9 @@ send, and topic metadata across restarts.
     a project like this).
 14. **Grafana's database is not in a Compose volume**, so every recreated
     container repeats its first-boot migrations (about 8 minutes on the test
-    laptop). One named volume for `/var/lib/grafana` would fix it.
+    laptop). One named volume for `/var/lib/grafana` would fix it. Done for
+    the production stack (2026-10-18, `deploy/prod/docker-compose.prod.yml`);
+    the local dev stack still has the problem, deliberately untouched.
 
 The Docker stack's double-counting of every metric (found while capturing the
 screenshot) is fixed in the same change, not left open: see `docs/issues.md`
@@ -397,10 +399,11 @@ from the README alone, without asking a question.
    memory all under 20% for 7 days) may be reclaimed, so redeploying must be
    one command. The broker has no authentication, so before opening the port
    it needs size limits: `KAFKA_MAX_PARTITIONS` and `KAFKA_RETENTION_MAX_BYTES`
-   (done 2026-10-18). Sequence: limits, then deployment files (prod compose,
-   VM bootstrap and redeploy scripts, `docs/deployment.md`), then the user
-   creates the Oracle instance, then bugs 8-11, then the README live-demo
-   link and the tag. Oracle is the best free option; Hetzner CX22 at ~EUR 4/mo is the
+   (done 2026-10-18). Sequence: limits (done), then deployment files (done
+   2026-10-18: `deploy/prod/`, `scripts/bootstrap-vm.sh`,
+   `scripts/redeploy.sh`, `docs/deployment.md`), then the user creates the
+   Oracle instance and runs the runbook, then bugs 8-11, then the README
+   live-demo link and the tag. Oracle is the best free option; Hetzner CX22 at ~EUR 4/mo is the
    zero-hassle alternative. Fly.io's free tier is gone for new accounts, and
    Render/Vercel-style PaaS cannot work at all - this is raw TCP, not HTTP.
 3. Optionally expose the Grafana dashboard read-only and link it from the

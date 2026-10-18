@@ -3,6 +3,11 @@
 Runs the broker itself, plus Prometheus + Grafana, as three containers.
 Fully self-contained - no need to `go run ./cmd/broker` first.
 
+> This directory's `docker-compose.yml` is the **local-dev** stack: Grafana
+> there gives anonymous visitors Admin, and the broker advertises
+> `localhost`. For a public server use `deploy/prod/` instead; see
+> [docs/deployment.md](../docs/deployment.md).
+
 ## Run it
 
 From this directory (`deploy/`):

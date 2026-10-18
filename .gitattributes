@@ -1,0 +1,4 @@
+# Shell scripts run on Linux, where a carriage return before the newline is a
+# syntax error ("$'\r': command not found"). Git on Windows would otherwise
+# check them out with CRLF line endings.
+*.sh text eol=lf

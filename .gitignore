@@ -3,3 +3,6 @@
 *.out
 /bin/
 /data/
+
+# Real production settings (the VM address, passwords). The template is .env.example.
+/deploy/prod/.env
