@@ -19,7 +19,8 @@ before pointing anything important at it.
   rebalancing, and a background reaper that evicts members that go silent.
 - **Committed offsets**, stored in an internal `__consumer_offsets` topic, replayed on startup, and
   compacted in the background.
-- **Topic management**: CreateTopics and DeleteTopics provision and remove storage for real.
+- **Topic management**: CreateTopics and DeleteTopics provision and remove storage for real, and the topic
+  list is saved to disk, so topics survive a restart.
 - **Durable storage**: append-only segment files with sparse offset and time indexes, torn-write recovery
   after a crash, and a configurable fsync policy (every 1000 records or 5 seconds, whichever comes first).
 - **Retention**: segments older than 7 days are deleted in the background.
@@ -166,6 +167,13 @@ offset, with a sparse `.index` (offset to byte position) and a `.timeindex` (tim
 - **Durability**: the active segment is fsynced every 1000 appended records or every 5 seconds, and a segment
   is always fsynced when it rolls. In a crash test (4 producers, `kill -9` mid-write), 0 of 45,160
   acknowledged records were lost.
+- **Topic list**: which topics exist, and how many partitions each has, is saved in `data/topics.json`. The
+  partition directories next to it hold the records but cannot say which of them are topics. Every change is
+  written to a temporary file, fsynced, and renamed over the real one, so a crash leaves either the old list
+  or the new one, never a mix. A file that is corrupt or has an unknown version stops the broker at startup
+  instead of letting it start empty. In a test that hard-killed the broker three times in the middle of
+  bursts of CreateTopics, all 1,090 acknowledged topics were still there afterwards. Leader and replica IDs
+  are not stored; they come from `KAFKA_NODE_ID` each time the broker starts.
 - **Retention**: a background job deletes whole segments older than 7 days, oldest first, never the active
   one. A fetch below the earliest remaining offset returns `OFFSET_OUT_OF_RANGE`.
 - **Compaction**: the internal `__consumer_offsets` topic is compacted to one record per key so it does not
@@ -252,10 +260,6 @@ This is an honest list of what does not work yet. Items marked with a bug number
 [docs/plan.md](docs/plan.md) under "Found by the 2026-10-13 evaluation".
 
 - **Single node, no replication.** One broker, one copy of the data.
-- **Topics do not survive a restart** (bug 5). The topic registry is held in memory. The data and committed
-  offsets stay on disk, but after a restart `Metadata` lists no topics, so clients cannot reach them until
-  the topics are created again. Creating a topic with the same name and partition count picks the existing
-  data back up.
 - **Topic names are not validated** (bug 6), and Produce does not check that the topic or partition exists
   (bug 7). Do not expose the broker to untrusted clients.
 - **No authentication or encryption.** There is no SASL and no TLS.
@@ -279,8 +283,10 @@ This is an honest list of what does not work yet. Items marked with a bug number
   is true of `__consumer_offsets` and nothing else. General per-topic compaction needs per-record keys
   inside batches and a storage format that can represent offset gaps, which breaks the store-batches-verbatim
   rule, so it was left out on purpose.
-- **Topic metadata should be persisted** instead of rebuilt in memory, which is the cause of the restart
-  limitation above.
+- **The topic list is one JSON file, rewritten whole on every CreateTopics or DeleteTopics.** That is simple
+  and crash-safe (write, fsync, atomic rename), and fine for a handful of topics. At thousands of topics each
+  change rewrites everything while holding the registry lock, and an append-only log of changes would scale
+  better. Replication will also need real cluster metadata, which is a different problem from this file.
 
 ## Future work
 

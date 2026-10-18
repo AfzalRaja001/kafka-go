@@ -286,3 +286,52 @@ The most serious bug so far - a silent data-corruption path, not a crash.
   `/metrics` while preparing a screenshot. No unit test can see this, because
   it only exists in the real Compose stack. Panels that fill in with data
   are not the same as panels that are correct.
+
+## 13. Every topic disappeared from `Metadata` after a restart
+
+- **Symptom:** found by the 2026-10-13 evaluation. After restarting the broker,
+  `kafka-topics --list` returned nothing and producers and consumers could not
+  reach any topic, although every record and every committed offset was still
+  on disk (a raw Fetch of the old partitions returned the data).
+- **Root cause:** `TopicRegistry` was only a `map` in memory. `CreateTopics`
+  wrote to it, nothing ever read it back, and the partition directories on
+  disk could not say which of them were topics (a directory is just
+  `name-N`). A restart therefore started with an empty registry.
+- **Fix:** the topic list (name and partition count only) is saved to
+  `data/topics.json` on every `CreateTopics` and `DeleteTopics`, written to a
+  temporary file, fsynced and renamed over the real one so a crash leaves
+  either the old list or the new one. It is loaded at startup, a corrupt or
+  unknown-version file stops the broker instead of starting empty, and a
+  failed save rolls the in-memory change back and reports an error so memory
+  never runs ahead of disk. `ensureStorage` re-creates any listed partition
+  whose directory is missing, which is the state a `DeleteTopics` that
+  crashed midway leaves behind.
+- **Caught by:** the evaluation harness (scenario 19, restart persistence),
+  which no unit test covered, because the registry and the data directory
+  were never exercised together across a process restart.
+- **Lesson:** persisting some state (records, offsets) while leaving the thing
+  that gives it meaning (which directories are topics) in memory gives a
+  broker that survives a restart on disk and not in any way a client can see.
+
+## 14. A broker with `KAFKA_NODE_ID` other than 1 could not be produced to
+
+- **Symptom:** found while reading the registry code for entry 13. With
+  `KAFKA_NODE_ID=3`, a topic created without error, but the official console
+  producer timed out ("Expiring 1 record(s) ... ms has passed since batch
+  creation") because it could not find the partition's leader.
+- **Root cause:** `createOneTopic` hardcoded `Leader: 1`, `Replicas: [1]` and
+  `ISR: [1]`, while the broker list in Metadata used the configured node ID.
+  PR #31 made the node ID configurable and missed this second place that
+  assumed it was 1. Clients were told the leader was a node that was not in
+  the broker list.
+- **Fix:** the registry takes the configured node ID and builds every
+  partition's leader, replicas and ISR from it, both when a topic is created
+  and when the topic list is loaded at startup. The ID is deliberately not
+  stored in `topics.json`, so reconfiguring the broker to a different node ID
+  takes effect on the next start (verified: restarted as node 5, the existing
+  topic produced and consumed correctly).
+- **Caught by:** reading the code while designing entry 13's fix, then
+  confirming it live. No test exercised a node ID other than 1.
+- **Lesson:** when a value becomes configurable, grep for the literal it
+  replaced. The default (1) hid the bug because every test and every normal
+  run used the default.

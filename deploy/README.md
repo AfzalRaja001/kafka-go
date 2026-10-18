@@ -60,10 +60,8 @@ docker compose down
 
 Prometheus and Grafana still start fresh each time (no dashboards/alerts to
 lose - they're provisioned from files, not clicked together). The broker's
-own data - records and committed consumer offsets - persists in a named
-volume (`broker-data`) across `docker compose down`/`up`, matching how the
-native `go run ./cmd/broker` workflow already behaves. One catch: the broker
-does not yet rebuild its list of topics from disk on startup (see
-`docs/plan.md`, evaluation bug 5), so after a restart, clients see no topics
-until they are created again. To wipe the data and start over:
+own data - topics, records and committed consumer offsets - persists in a
+named volume (`broker-data`) across `docker compose down`/`up`, matching how
+the native `go run ./cmd/broker` workflow already behaves. The topic list is
+the `topics.json` file inside that volume. To wipe the data and start over:
 `docker compose down -v`.

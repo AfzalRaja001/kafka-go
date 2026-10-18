@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"time"
 
 	"github.com/AfzalRaja001/kafka-go/internal/broker"
@@ -26,6 +27,11 @@ const (
 	metricsAddr = ":9101"
 
 	dataDir = "data"
+
+	// topicsFile lists the topics that exist, inside dataDir. The partition
+	// directories next to it hold the records but cannot say which of them
+	// are topics, so without this file a restart would leave Metadata empty.
+	topicsFile = "topics.json"
 
 	// segmentMaxBytes and indexEvery are deliberately small for now, while
 	// this is being tested at hand-run scale - real Kafka defaults to
@@ -89,16 +95,28 @@ func main() {
 	diskLog := storage.NewDiskLog(dataDir, segmentMaxBytes, indexEvery, flushEveryMessages)
 	defer diskLog.Close()
 
-	// No hardcoded topic anymore: CreateTopics (api_key 19) now provisions
-	// topics for real, in both the registry and storage. A fresh broker
-	// starts with none, matching real Kafka.
-	registry := protocol.NewTopicRegistry()
-
 	self, err := brokerConfigFromEnv(os.Getenv)
 	if err != nil {
 		log.Fatalf("broker config: %v", err)
 	}
 	brokers := []protocol.Broker{self}
+
+	// CreateTopics (api_key 19) provisions topics for real, in both the
+	// registry and storage, and every change is saved to the topics file. A
+	// broker that has never created a topic has no file and starts with
+	// none, matching real Kafka; one that has restarts with its topics. The
+	// registry takes the configured node ID so that every partition's
+	// leader matches the node Metadata advertises.
+	registry, err := protocol.OpenTopicRegistry(filepath.Join(dataDir, topicsFile), self.NodeID)
+	if err != nil {
+		log.Fatalf("topic registry: %v", err)
+	}
+	if err := ensureStorage(registry, diskLog); err != nil {
+		log.Fatalf("topic storage: %v", err)
+	}
+	if n := len(registry.All()); n > 0 {
+		log.Printf("restored %d topic(s) from %s", n, filepath.Join(dataDir, topicsFile))
+	}
 
 	offsetStore, err := offsets.NewLogBackedStore(diskLog)
 	if err != nil {
