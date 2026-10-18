@@ -886,3 +886,62 @@ start also pulling images), while `docker compose stop`/`start` keeps the contai
 measured); and the compose file's claim that topics survive a restart was wrong while bug 5 is open, so the comment
 and the deploy README now say record data and offsets persist but topics must be created again. The screenshot is
 a 1600x1000 PNG taken with headless Edge, because the in-app browser pane only produces 800x550 images.
+
+## 2026-10-17 - Persisting the topic list: a small file, written atomically
+
+Bug 5: a restart left `Metadata` empty because `TopicRegistry` was only an in-memory map, while every partition
+directory and committed offset was still on disk. Three places the list could live were considered. A small
+metadata file, chosen: `data/topics.json`, holding a version and each topic's name and partition count. Rebuilding
+the list by scanning data directories, rejected: a directory is only `name-N`, so a scan cannot tell a real topic
+from a stray directory, and the strays exist (bug 7's hidden directories, a `CreateTopics` that failed midway and
+is documented to leave orphans, a `DeleteTopics` that crashed midway), so each would reappear as a topic, possibly
+with missing partitions. Logging topic changes in an internal topic like `__consumer_offsets`, rejected: it matches
+an existing idiom, but needs replay, ordering and compaction machinery for what is a handful of records.
+
+**Only what cannot be derived is stored.** The file holds a name and a partition count. Leader, replicas and ISR
+come from the node ID in the broker's configuration each time the registry is opened, so they cannot go stale in
+the file. This is also what fixed a second bug found while reading the code (`docs/issues.md` entry 14):
+`createOneTopic` hardcoded `Leader: 1`, so a broker configured with `KAFKA_NODE_ID=3` told clients a leader that
+was not in its own broker list. The registry now builds partitions from the configured ID (`NewTopic`) in both
+places, and reconfiguring the node ID takes effect on the next start.
+
+**The write is atomic.** The new list is written to `topics.json.tmp`, fsynced, renamed over the real file, and the
+directory is fsynced so the rename itself survives a power loss. A crash leaves the complete old file or the
+complete new one, never a mix, which is what makes it safe to treat as the source of truth. Windows cannot fsync a
+directory, so that one step is skipped there; the Linux deployment target does it. A stale `.tmp` left by a crash
+is simply overwritten by the next write.
+
+**Loading is strict.** A missing file means a broker that has never created a topic and starts empty, as before. A
+file that exists but is empty, not JSON, an unknown version, has an empty name, a duplicate, or a partition count
+outside 1 to 1000 stops startup with a clear error. Starting empty instead would silently disown every topic,
+the very failure this fixes. The partition cap is also a safety guard: removing it from the loader makes a
+doctored file crash the broker with `fatal error: out of memory`, the same class of bug the request hardening PR
+closed (checked by mutation).
+
+**Memory never runs ahead of disk.** `AddTopic` and `RemoveTopic` now persist before returning, and undo the
+in-memory change if the save fails; the handlers report `UNKNOWN_SERVER_ERROR`. Persisting happens under the
+registry's write lock, which also serialises concurrent writers (a test runs 40 concurrent creates under the race
+detector). `NewTopicRegistry()` stays memory-only, so the existing tests are unchanged.
+
+**`DeleteTopics` keeps its order**: storage first, then the registry. Persistence makes the crash window between
+them survive a restart, so a small `ensureStorage` runs at startup and re-creates the partitions of any listed topic
+whose directory is missing, empty. The alternative, saving the removal first, would leave orphaned directories that
+a later `CreateTopics` of the same name would silently reattach: deleted data coming back.
+
+**No migration** for data directories from before this change: with no `topics.json`, the broker starts with no
+topics, exactly as it did. There is no deployed data, so a one-off derive-from-directories step would be code that
+runs once and brings back the stray-directory ambiguity above. Creating a topic with the same name and partition
+count still picks the old data back up.
+
+Tests were written first and confirmed failing (the new API did not exist), then four deliberate breakages
+confirmed the tests catch what they claim to: hardcoding the leader again (2 tests fail), skipping the rollback
+(2 fail), dropping the partition-cap check (the loader test crashes with out of memory), and skipping the atomic
+rename (7 fail). Verified against a real broker with the official Kafka 3.9.1 tools: hard-killing and restarting
+keeps topics, data and a consumer group's committed offset; a delete stays deleted; a topic whose partition
+directory was removed by hand is repaired at startup and can be deleted cleanly; a corrupt file stops the broker
+with exit code 1 and a clear message; `KAFKA_NODE_ID=3` produces and consumes where it used to time out, and
+survives being reconfigured to 5; and three hard kills in the middle of bursts of `CreateTopics` lost none of the
+1,090 acknowledged topics, leaving a valid sorted file and no stray temp file. One earlier run of the restart check
+was contaminated by a leftover background load process of my own (it wrote about 600,000 records into the topic
+I had just created) and was discarded and re-run from a clean directory. Evaluation scenario 19 now passes, with
+no regressions.

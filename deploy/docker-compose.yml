@@ -32,12 +32,11 @@ services:
       # of the two targets is ever up" actually true.
       - "9102:9101"
     volumes:
-      # Named volume, not a bind mount: record data and committed offsets
-      # survive `docker compose down`/`up` and container restarts, matching
-      # how the native `go run ./cmd/broker` workflow already behaves (its own
-      # ./data directory persists on disk between runs). The topic list itself
-      # is held in memory and is not rebuilt on startup yet (docs/plan.md,
-      # evaluation bug 5), so topics must be created again after a restart.
+      # Named volume, not a bind mount: topics (the topics.json file), record
+      # data and committed offsets survive `docker compose down`/`up` and
+      # container restarts, matching how the native `go run ./cmd/broker`
+      # workflow already behaves (its own ./data directory persists on disk
+      # between runs).
       - broker-data:/app/data
 
   prometheus:

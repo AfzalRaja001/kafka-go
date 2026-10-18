@@ -44,7 +44,7 @@ they are useful framing when describing the project.
 | 7 | Deploy | Partially done, **blocks v1.0** |
 | 6 | Replication (stretch) | Not started, gated |
 
-32 PRs merged, none open (the README and artifacts work is the next one to
+33 PRs merged, none open (persistent topics, below, is the next one to
 open). All of
 `go build ./... && go vet ./... && go test -race ./...` passes, and CI
 (`.github/workflows/ci.yml`) runs exactly that on every push and PR.
@@ -275,12 +275,25 @@ send, and topic metadata across restarts.
    prefix each pushed the broker from 53MB to 6.2GB. Capped at 100MB, and
    the body buffer now grows only as bytes actually arrive.
 
-**Topic registry - open, blocks `v1.0-singlenode`:**
+**Topic registry:**
 
-5. Topics vanish from `Metadata` after every restart. The registry is
-   in-memory only; data and committed offsets survive on disk, but normal
-   clients can no longer reach them. Any restart of a deployed broker would
-   look like total data loss to its clients.
+5. **CLOSED (2026-10-17).** Topics vanished from `Metadata` after every
+   restart: the registry was in-memory only, so a restart of a deployed
+   broker would have looked like total data loss to its clients. The topic
+   list is now saved to `data/topics.json` (name and partition count only)
+   with an atomic write-fsync-rename, loaded at startup, and any listed
+   partition whose directory is missing is re-created empty. A corrupt file
+   stops startup. Verified by hard-killing the broker mid-burst of
+   CreateTopics: all 1,090 acknowledged topics survived. See
+   `docs/issues.md` entry 13.
+5b. **CLOSED (2026-10-17), found while fixing 5.** Every partition hardcoded
+   `Leader: 1`, so a broker configured with `KAFKA_NODE_ID=3` advertised a
+   leader that was not in its own broker list and producing timed out. The
+   registry now builds leader, replicas and ISR from the configured node ID.
+   See `docs/issues.md` entry 14.
+
+**Still open, and now the next blockers for `v1.0-singlenode`:**
+
 6. Topic names are not validated - `../escape` created a directory outside
    the data folder (path traversal); `..`, `a/b`, spaces and 250-character
    names are all accepted, where real Kafka rejects them.
@@ -344,9 +357,10 @@ Priority order within the step (retention, the advertised-host fix from
 Step 2 below, and fsync all shipped ahead of this order - PRs #30-#32 - and
 are struck from here, not re-listed):
 
-1. **Topic registry** (evaluation bugs 5-7). Ahead of everything else:
-   until topics survive a restart, any deployed broker loses every topic the
-   first time it restarts.
+1. **Topic registry, remaining half** (evaluation bugs 6-7: topic name
+   validation and the Produce existence check). Bug 5, topics surviving a
+   restart, is done (2026-10-17). These two matter more on a public server,
+   where strangers can reach the path traversal.
 2. **README + artifacts** (~4 hrs, Track A or either). DONE except the demo
    GIF (2026-10-17): full README with a verified Quickstart, a Mermaid
    architecture diagram, a Grafana screenshot, real benchmark numbers, known

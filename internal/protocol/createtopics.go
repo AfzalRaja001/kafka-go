@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"fmt"
+	"log"
 
 	"github.com/AfzalRaja001/kafka-go/internal/storage"
 )
@@ -99,7 +100,7 @@ func DecodeCreateTopicsRequest(buf []byte) (CreateTopicsRequest, error) {
 // each requested topic's partitions in both the registry (so Metadata sees
 // it) and storage (so it's immediately Fetch/ListOffsets-able) before
 // reporting success.
-func HandleCreateTopics(correlationID int32, requestBody []byte, registry *TopicRegistry, log storage.Log) ([]byte, error) {
+func HandleCreateTopics(correlationID int32, requestBody []byte, registry *TopicRegistry, diskLog storage.Log) ([]byte, error) {
 	req, err := DecodeCreateTopicsRequest(requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("create_topics request: %w", err)
@@ -110,7 +111,7 @@ func HandleCreateTopics(correlationID int32, requestBody []byte, registry *Topic
 	enc.Int32(int32(len(req.Topics)))
 
 	for _, topic := range req.Topics {
-		errorCode := createOneTopic(registry, log, topic)
+		errorCode := createOneTopic(registry, diskLog, topic)
 		enc.String(topic.Name)
 		enc.Int16(errorCode)
 	}
@@ -133,7 +134,11 @@ const MaxPartitionsPerTopic = 1000
 // successfully created - a partial failure partway through leaves orphaned
 // but harmless empty partition directories on disk rather than a topic
 // that's registered without all its storage, which would be worse.
-func createOneTopic(registry *TopicRegistry, log storage.Log, req CreateTopicsTopicRequest) int16 {
+//
+// Registering also saves the topic list to disk, so the topic is only
+// reported as created once it would survive a restart. If that save fails
+// the create fails with it, leaving the same harmless orphaned directories.
+func createOneTopic(registry *TopicRegistry, diskLog storage.Log, req CreateTopicsTopicRequest) int16 {
 	if _, exists := registry.Get(req.Name); exists {
 		return ErrTopicAlreadyExists
 	}
@@ -141,14 +146,15 @@ func createOneTopic(registry *TopicRegistry, log storage.Log, req CreateTopicsTo
 		return ErrInvalidPartitions
 	}
 
-	partitions := make([]PartitionMetadata, req.NumPartitions)
 	for i := int32(0); i < req.NumPartitions; i++ {
-		if err := log.CreatePartition(req.Name, i); err != nil {
+		if err := diskLog.CreatePartition(req.Name, i); err != nil {
 			return ErrUnknownServerError
 		}
-		partitions[i] = PartitionMetadata{ID: i, Leader: 1, Replicas: []int32{1}, ISR: []int32{1}}
 	}
 
-	registry.AddTopic(&Topic{Name: req.Name, Partitions: partitions})
+	if err := registry.AddTopic(registry.NewTopic(req.Name, req.NumPartitions)); err != nil {
+		log.Printf("create topic %q: saving the topic list failed: %v", req.Name, err)
+		return ErrUnknownServerError
+	}
 	return ErrNone
 }
