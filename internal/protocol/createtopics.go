@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"errors"
 	"fmt"
 	"log"
 
@@ -150,6 +151,11 @@ func createOneTopic(registry *TopicRegistry, diskLog storage.Log, req CreateTopi
 	if req.NumPartitions < 1 || req.NumPartitions > MaxPartitionsPerTopic {
 		return ErrInvalidPartitions
 	}
+	// Early turn-away for the broker-wide partition cap, before any
+	// storage exists. AddTopic below repeats the check atomically.
+	if !registry.HasRoomFor(req.NumPartitions) {
+		return ErrInvalidPartitions
+	}
 
 	for i := int32(0); i < req.NumPartitions; i++ {
 		if err := diskLog.CreatePartition(req.Name, i); err != nil {
@@ -158,6 +164,19 @@ func createOneTopic(registry *TopicRegistry, diskLog storage.Log, req CreateTopi
 	}
 
 	if err := registry.AddTopic(registry.NewTopic(req.Name, req.NumPartitions)); err != nil {
+		if errors.Is(err, ErrTooManyPartitions) {
+			// Lost a race: other creates filled the last slots between the
+			// early check and now. Take back the partitions made for this
+			// one so a refused create leaves nothing behind - unless a topic
+			// of this name has been registered meanwhile, whose partitions
+			// these directories now are.
+			if _, registered := registry.Get(req.Name); !registered {
+				for i := int32(0); i < req.NumPartitions; i++ {
+					diskLog.DeletePartition(req.Name, i)
+				}
+			}
+			return ErrInvalidPartitions
+		}
 		log.Printf("create topic %q: saving the topic list failed: %v", req.Name, err)
 		return ErrUnknownServerError
 	}

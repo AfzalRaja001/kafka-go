@@ -999,3 +999,49 @@ disk (the Java client may check names itself before sending, so evaluation scena
 protocol bytes and passes); producing to an unknown topic times out with `UnknownTopicOrPartitionException` and
 creates no directory; and a `topics.json` naming `../evil` stops the broker with exit code 1. Evaluation scenarios
 02 and 08 now pass, with no other scenario changing.
+
+## 2026-10-18 - Limits for a broker that strangers can reach (first step of deployment)
+
+The deployment target is a free Oracle Cloud VM with the broker's port open to the internet, and the broker has no
+authentication. That makes disk and file handles the resources a stranger can exhaust, so before deploying the
+broker gets two optional limits, set by environment variables like the advertised address.
+
+**`KAFKA_MAX_PARTITIONS`: a cap on partitions across all topics.** `MaxPartitionsPerTopic` (1000) only bounds one
+request, so a client could create topics one after another until the broker ran out of file handles or disk; each
+partition is a directory, three open files and a share of the 16 MB segment. The registry now holds the cap and
+`CreateTopics` answers `INVALID_PARTITIONS` (37) when a new topic would go over it. Exactly reaching the cap is
+allowed, deleting a topic frees its partitions, and replacing a topic of the same name counts only the difference.
+The cap limits new topics only: a `topics.json` written under a higher cap still loads in full, because refusing to
+start (or silently dropping a topic) for being over a limit would disown existing data, which is the failure the
+persistent topic list was built to prevent.
+
+**The check happens twice on purpose.** `CreateTopics` asks `HasRoomFor` first so a refused create is turned away
+before any storage exists; that answer can be stale under concurrency, so `AddTopic` repeats it atomically under the
+registry's lock and is the one that decides. A create that loses that race deletes the partitions it made, so a
+refused create leaves nothing behind, except when a topic of the same name has been registered in the meantime,
+whose partitions those directories now are (a test simulates this race with a storage hook). A test with 40
+concurrent creates against a cap of 5 confirms exactly 5 succeed and exactly 5 partitions exist in storage.
+
+**`KAFKA_RETENTION_MAX_BYTES`: a per-partition size cap**, passed to the retention code that already existed
+(`Partition.ApplyRetention`, tested since the retention PR) in place of the old constant 0. With the partition cap,
+disk use has a worst case: partitions times (cap plus one 16 MB segment), for example 200 times about 116 MB, around
+23 GB, inside the 50 GB boot disk. It is a bound, not a guarantee: retention runs every 5 minutes, so a fast client
+can overshoot between sweeps, and the segment being written is never deleted. Closing that completely would need a
+check on the Produce path, which was left out.
+
+**Both default to 0, meaning unlimited**, so a local run behaves exactly as before. A value that is set but invalid
+(not a number, negative, out of range) stops the broker at startup, because a mistyped limit that quietly became
+"unlimited" would leave a public broker unprotected without anyone noticing. The startup log now prints the limits
+in force.
+
+Tests were written first and failed on behaviour (six tests, with the no-cap control passing) once the new
+function names were stubbed. Eight deliberate breakages were each caught except one that is correct to survive:
+AddTopic not enforcing the cap, an off-by-one in the comparison, a replaced topic counted twice, no cleanup of a
+refused create, the cleanup deleting a concurrently registered topic's partitions, a negative `KAFKA_MAX_PARTITIONS`
+accepted, and a negative cap kept as a cap. Removing the early `HasRoomFor` check changes nothing observable (the
+atomic check and cleanup cover it), which is why it is documented as a fast path. The cleanup-guard test was added
+after its mutation first survived. Verified against a real broker with the official Kafka 3.9.1 tools and a cap of 5:
+a 3-partition topic is created, a second 3-partition topic is refused, a 2-partition topic is created at exactly the
+cap, one more partition is refused, no directory exists for any refused topic, and deleting the first topic lets a new
+one in. With a 20 MB size cap, 70 MB written to one partition (five segments) was trimmed to the single 9.8 MB active
+segment at the next sweep. A bad value exits at startup with a message naming the variable.

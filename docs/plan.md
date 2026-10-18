@@ -390,8 +390,17 @@ from the README alone, without asking a question.
    (2026-09-12, shipped early rather than waiting on Step 1). `listenAddr`
    already bound `0.0.0.0`; only the advertised address needed to become
    configurable.
-2. Stand it up on a VPS. Oracle Cloud Always Free ARM (2 OCPU / 12GB since
-   June 2026) is the best free option; Hetzner CX22 at ~EUR 4/mo is the
+2. Stand it up on a VPS. **Decided 2026-10-18: Oracle Cloud Always Free ARM,
+   open to the internet from day one, bugs 8-11 fixed before the tag.**
+   Checked against Oracle's own page: 2 OCPU / 12 GB, 200 GB disk, 10 TB/month
+   outbound traffic, and idle Always Free instances (CPU, network and, on ARM,
+   memory all under 20% for 7 days) may be reclaimed, so redeploying must be
+   one command. The broker has no authentication, so before opening the port
+   it needs size limits: `KAFKA_MAX_PARTITIONS` and `KAFKA_RETENTION_MAX_BYTES`
+   (done 2026-10-18). Sequence: limits, then deployment files (prod compose,
+   VM bootstrap and redeploy scripts, `docs/deployment.md`), then the user
+   creates the Oracle instance, then bugs 8-11, then the README live-demo
+   link and the tag. Oracle is the best free option; Hetzner CX22 at ~EUR 4/mo is the
    zero-hassle alternative. Fly.io's free tier is gone for new accounts, and
    Render/Vercel-style PaaS cannot work at all - this is raw TCP, not HTTP.
 3. Optionally expose the Grafana dashboard read-only and link it from the
