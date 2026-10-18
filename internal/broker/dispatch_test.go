@@ -71,27 +71,63 @@ func TestDispatch_Metadata(t *testing.T) {
 	}
 }
 
-func TestDispatch_Produce(t *testing.T) {
+// dispatchProduce sends a one-partition Produce v3 request for (topic,
+// partition) through dispatch and returns the partition's error code.
+func dispatchProduce(t *testing.T, registry *protocol.TopicRegistry, diskLog storage.Log, topic string, partition int32) (correlationID int32, errorCode int16) {
+	t.Helper()
 	enc := encodeRequestHeader(protocol.ApiKeyProduce, 3, 9, "kcat")
 	var txnID *string
 	enc.NullableString(txnID)
 	enc.Int16(1) // acks
 	enc.Int32(0) // timeout_ms
 	enc.Int32(1) // topic count
-	enc.String("orders")
+	enc.String(topic)
 	enc.Int32(1) // partition count
-	enc.Int32(0) // partition
+	enc.Int32(partition)
 	enc.Bytes(buildMinimalRecordBatch())
 
-	resp, err := dispatch(enc.Result(), protocol.NewTopicRegistry(), nil, storage.NewFakeLog(), group.NewInMemoryOffsetStore(), group.NewCoordinator(20*time.Millisecond), metrics.NewRecorder())
+	resp, err := dispatch(enc.Result(), registry, nil, diskLog, group.NewInMemoryOffsetStore(), group.NewCoordinator(20*time.Millisecond), metrics.NewRecorder())
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 
 	dec := protocol.NewDecoder(resp)
-	correlationID, _ := dec.Int32()
+	correlationID, _ = dec.Int32()
+	dec.Int32() // topic count
+	dec.String()
+	dec.Int32() // partition count
+	dec.Int32() // partition
+	errorCode, _ = dec.Int16()
+	return correlationID, errorCode
+}
+
+func TestDispatch_Produce(t *testing.T) {
+	registry := protocol.NewTopicRegistry()
+	if err := registry.AddTopic(registry.NewTopic("orders", 1)); err != nil {
+		t.Fatal(err)
+	}
+	diskLog := storage.NewFakeLog()
+	diskLog.CreatePartition("orders", 0)
+
+	correlationID, errorCode := dispatchProduce(t, registry, diskLog, "orders", 0)
 	if correlationID != 9 {
 		t.Errorf("correlation_id = %d, want 9", correlationID)
+	}
+	if errorCode != protocol.ErrNone {
+		t.Errorf("error_code = %d, want %d", errorCode, protocol.ErrNone)
+	}
+}
+
+// Dispatch must hand Produce the registry: against an empty one, a produce
+// to a topic nobody created is refused rather than silently creating it.
+func TestDispatch_ProduceToUnknownTopicIsRejected(t *testing.T) {
+	diskLog := storage.NewFakeLog()
+	_, errorCode := dispatchProduce(t, protocol.NewTopicRegistry(), diskLog, "orders", 0)
+	if errorCode != protocol.ErrUnknownTopicOrPartition {
+		t.Errorf("error_code = %d, want %d", errorCode, protocol.ErrUnknownTopicOrPartition)
+	}
+	if _, err := diskLog.LatestOffset("orders", 0); err == nil {
+		t.Error("the rejected produce created a partition in storage")
 	}
 }
 

@@ -51,8 +51,11 @@ func loadTopicsFile(path string) ([]topicRecord, error) {
 
 	seen := make(map[string]bool, len(file.Topics))
 	for _, t := range file.Topics {
-		if t.Name == "" {
-			return nil, errors.New("topic with an empty name")
+		// The same rule CreateTopics applies: a hand-edited file must not be
+		// able to smuggle in a name that becomes a path outside the data
+		// directory.
+		if err := ValidateTopicName(t.Name); err != nil {
+			return nil, fmt.Errorf("invalid topic name %.60q: %w", t.Name, err)
 		}
 		// The partition cap doubles as a guard on what gets allocated: a
 		// doctored file must not be able to make the broker build billions

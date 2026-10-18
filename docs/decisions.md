@@ -945,3 +945,57 @@ survives being reconfigured to 5; and three hard kills in the middle of bursts o
 was contaminated by a leftover background load process of my own (it wrote about 600,000 records into the topic
 I had just created) and was discarded and re-run from a clean directory. Evaluation scenario 19 now passes, with
 no regressions.
+
+## 2026-10-18 - Topic names and the Produce existence check (evaluation bugs 6 and 7)
+
+Two bugs shared one idea: the broker let a client decide what exists. A topic name flows into a directory name, and a
+Produce could bring a partition into being by writing to it.
+
+**Topic names follow Kafka's own rules**, chosen over two alternatives. The rules: 1 to 249 characters, only ASCII
+letters, digits, `.`, `_` and `-`, and not exactly `.` or `..`. Matching Kafka means every name the official tools and
+client libraries allow works here, and every one they refuse is refused here too. A stricter rule (no dots) would have
+rejected legitimate names such as `orders.v1`. Kafka's extra rule that `a.b` and `a_b` collide was left out: it exists
+because Kafka's metric names cannot tell `.` from `_`, and here the topic name is a directory name and a metric
+label value, where the two do not collide. The check is a byte loop over an allowlist, not a blocklist of bad
+characters: everything allowed is ASCII, so any byte of 0x80 or above (a multi-byte or invalid UTF-8 sequence) is
+refused without decoding, and `/`, `\`, `:` and NUL are refused simply by not being on the list. An invalid name is
+answered with `INVALID_TOPIC_EXCEPTION` (17), the code Kafka uses.
+
+**The same validator runs when `topics.json` is loaded.** The file is the broker's own, but it is also a file a person
+can edit, and a name in it becomes a path at startup. The loader previously only refused an empty name; it now refuses
+anything `CreateTopics` would refuse, and the broker stops with a message naming the offending topic.
+
+**Produce rejects what CreateTopics never made**, instead of auto-creating like Kafka's `auto.create.topics.enable`.
+Auto-create would turn every client typo into a persistent topic and let any stranger on a public server create
+unlimited topics. A rejected partition gets `UNKNOWN_TOPIC_OR_PARTITION` (3) with base offset -1 and nothing is
+written. The check is per partition, because that is how the Produce response is shaped: a request with one good and
+one bad partition writes the good one.
+
+**The check lives in the protocol layer**, where `HandleProduce` now receives the topic registry (through `dispatch`,
+the same way `CreateTopics` and `Metadata` get it). The alternative, also making `DiskLog.Append` refuse to create a
+partition, was left out: it would touch the storage layer (Track B) and a large number of storage tests for a second
+line of defence that nothing can reach now that the only caller checks first. It stays a possible follow-up.
+
+**Registry and storage disagreeing is the broker's fault, not the client's.** If the registry lists a partition that
+storage lacks (the state `ensureStorage` repairs at startup), Produce answers `UNKNOWN_SERVER_ERROR`, logs it, and
+does not create the partition. Before, `produceOne` treated any `LatestOffset` error as "new partition, start at
+0", which is exactly what hid this class of problem.
+
+**Scope: Produce only**, as chosen. Fetch and ListOffsets already return error 3 for a partition storage does not
+have, so they agree with the registry now that Produce no longer fabricates partitions. OffsetCommit and
+OffsetFetch still accept any topic name without consulting the registry; that is noted in `docs/plan.md` rather than
+widened into this change.
+
+Tests were written first. With only the new function signatures stubbed, the new tests failed on behaviour (eight
+tests across validation, creation, the loader and Produce, including the path-traversal test, which created real
+directories outside the data folder). After the fix they pass, and deliberately breaking each check in turn was
+caught every time: no existence check, off-by-one on the partition count, negative partitions allowed, CreateTopics
+skipping the name check, the loader skipping it, dot names allowed, the length limit off by one, underscore and
+digits disallowed. Three existing tests, which relied on Produce silently creating its own storage, now set up a
+registered topic and its partition the way `CreateTopics` does; the dispatch-level Produce test now also checks
+the error code, which it never did. Verified against a real broker with the official Kafka 3.9.1 tools: valid
+`orders.v1` works end to end; `../escape` and `a b` are refused with `InvalidTopicException` and nothing appears on
+disk (the Java client may check names itself before sending, so evaluation scenario 02 does the same over raw
+protocol bytes and passes); producing to an unknown topic times out with `UnknownTopicOrPartitionException` and
+creates no directory; and a `topics.json` naming `../evil` stops the broker with exit code 1. Evaluation scenarios
+02 and 08 now pass, with no other scenario changing.

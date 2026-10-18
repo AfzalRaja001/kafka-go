@@ -8,6 +8,7 @@ const (
 	ErrOffsetOutOfRange          int16 = 1
 	ErrUnknownTopicOrPartition   int16 = 3
 	ErrCorruptMessage            int16 = 2
+	ErrInvalidTopic              int16 = 17
 	ErrUnsupportedVersion        int16 = 35
 	ErrTopicAlreadyExists        int16 = 36
 	ErrInvalidPartitions         int16 = 37
