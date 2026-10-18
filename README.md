@@ -249,9 +249,15 @@ tells clients where to reconnect, so on a server it must advertise an address cl
 | `KAFKA_ADVERTISED_HOST` | `localhost` | Host returned to clients in Metadata and FindCoordinator |
 | `KAFKA_ADVERTISED_PORT` | `9092` | Port returned to clients |
 | `KAFKA_NODE_ID` | `1` | This broker's node ID |
+| `KAFKA_MAX_PARTITIONS` | `0` (no limit) | Most partitions allowed across all topics together; `CreateTopics` beyond it fails with `INVALID_PARTITIONS` |
+| `KAFKA_RETENTION_MAX_BYTES` | `0` (no limit) | Size cap per partition in bytes; the oldest segments are deleted when a partition is over it |
+
+The last two exist for a broker that strangers can reach, since there is no authentication: they bound how much
+disk and how many file handles a client can use. A partition can overshoot its size cap between retention
+sweeps (every 5 minutes), and the segment being written is never deleted.
 
 A value that is set but invalid stops the broker at startup instead of silently falling back to the default.
-Everything else (listen ports, data directory, segment size, retention, fsync policy) is a constant in
+Everything else (listen ports, data directory, segment size, retention age, fsync policy) is a constant in
 [cmd/broker/main.go](cmd/broker/main.go); there is no config file yet.
 
 ## Known limitations

@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 )
@@ -46,7 +47,17 @@ type TopicRegistry struct {
 
 	// path is the topics file, or "" for a registry that is memory-only.
 	path string
+
+	// maxPartitions caps the partitions across every topic together; 0 means
+	// no cap. MaxPartitionsPerTopic only bounds one request, so without this
+	// a client could create topics one after another until the broker ran
+	// out of file handles or disk. See SetMaxPartitions.
+	maxPartitions int32
 }
+
+// ErrTooManyPartitions is returned by AddTopic when registering the topic
+// would take the broker past its total partition cap.
+var ErrTooManyPartitions = errors.New("adding the topic would exceed the broker's total partition limit")
 
 // NewTopicRegistry returns an empty, memory-only registry for node 1.
 func NewTopicRegistry() *TopicRegistry {
@@ -87,14 +98,59 @@ func (r *TopicRegistry) NewTopic(name string, numPartitions int32) *Topic {
 	return &Topic{Name: name, Partitions: partitions}
 }
 
+// SetMaxPartitions sets the cap on partitions across all topics together.
+// Zero or a negative number means no cap, which is also the default. The cap
+// only limits topics added afterwards: topics already registered (loaded
+// from the topics file, say) are never disowned because the cap was lowered.
+func (r *TopicRegistry) SetMaxPartitions(n int32) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if n < 0 {
+		n = 0
+	}
+	r.maxPartitions = n
+}
+
+// partitionCountLocked returns the partitions across all topics, not
+// counting the topic called except (pass "" to count them all). The caller
+// must hold r.mu.
+func (r *TopicRegistry) partitionCountLocked(except string) int64 {
+	var total int64
+	for name, t := range r.topics {
+		if name != except {
+			total += int64(len(t.Partitions))
+		}
+	}
+	return total
+}
+
+// HasRoomFor reports whether a new topic of n partitions fits under the
+// total cap right now. It is a fast path so a refused create can be turned
+// away before any storage is made; the answer can be stale by the time the
+// caller acts on it, so AddTopic repeats the check under the lock and is the
+// one that decides.
+func (r *TopicRegistry) HasRoomFor(n int32) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.maxPartitions == 0 || r.partitionCountLocked("")+int64(n) <= int64(r.maxPartitions)
+}
+
 // AddTopic registers t, replacing any topic of the same name, and saves the
 // topic list if this registry is file-backed. If saving fails the change is
 // undone in memory and the error returned: memory never runs ahead of disk,
 // so a topic that was reported as not created cannot show up in Metadata
 // only to vanish at the next restart.
+//
+// If a total partition cap is set (SetMaxPartitions) and t would take the
+// registry past it, nothing changes and ErrTooManyPartitions is returned.
+// When t replaces a topic of the same name, only the difference counts.
 func (r *TopicRegistry) AddTopic(t *Topic) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if r.maxPartitions != 0 && r.partitionCountLocked(t.Name)+int64(len(t.Partitions)) > int64(r.maxPartitions) {
+		return ErrTooManyPartitions
+	}
 
 	previous, existed := r.topics[t.Name]
 	r.topics[t.Name] = t

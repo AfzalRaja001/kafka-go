@@ -71,12 +71,10 @@ const (
 	retentionCheckInterval = 5 * time.Minute
 
 	// retentionMaxAge matches real Kafka's own default retention.ms (7
-	// days). retentionMaxBytes is 0 (disabled) by default, matching real
-	// Kafka's retention.bytes=-1 "unlimited" convention - either can be
-	// set to bound a partition's disk footprint by size instead of or in
-	// addition to age.
-	retentionMaxAge   = 7 * 24 * time.Hour
-	retentionMaxBytes = 0
+	// days). The size limit is not a constant: it comes from
+	// KAFKA_RETENTION_MAX_BYTES (see limitsFromEnv), 0 meaning unlimited,
+	// matching real Kafka's retention.bytes=-1 convention.
+	retentionMaxAge = 7 * 24 * time.Hour
 
 	// flushEveryMessages and flushInterval are the fsync policy's two
 	// independent triggers - whichever fires first flushes a partition's
@@ -101,6 +99,11 @@ func main() {
 	}
 	brokers := []protocol.Broker{self}
 
+	lim, err := limitsFromEnv(os.Getenv)
+	if err != nil {
+		log.Fatalf("broker limits: %v", err)
+	}
+
 	// CreateTopics (api_key 19) provisions topics for real, in both the
 	// registry and storage, and every change is saved to the topics file. A
 	// broker that has never created a topic has no file and starts with
@@ -114,6 +117,7 @@ func main() {
 	if err := ensureStorage(registry, diskLog); err != nil {
 		log.Fatalf("topic storage: %v", err)
 	}
+	registry.SetMaxPartitions(lim.MaxPartitions)
 	if n := len(registry.All()); n > 0 {
 		log.Printf("restored %d topic(s) from %s", n, filepath.Join(dataDir, topicsFile))
 	}
@@ -132,10 +136,11 @@ func main() {
 	go runMetricsServer(ctx, recorder)
 	go runMetricsCollector(ctx, metricsCollectInterval, registry, diskLog, offsetStore, recorder)
 	go runOffsetsCompactor(ctx, offsetsCompactInterval, offsetStore)
-	go runRetention(ctx, retentionCheckInterval, registry, diskLog, retentionMaxAge, retentionMaxBytes)
+	go runRetention(ctx, retentionCheckInterval, registry, diskLog, retentionMaxAge, lim.RetentionMaxBytes)
 	go runFlush(ctx, flushInterval, registry, diskLog)
 
 	log.Printf("kafka-go broker listening on %s, advertising %s:%d", listenAddr, self.Host, self.Port)
+	log.Printf("limits: max partitions %s, retention max bytes per partition %s", describeLimit(int64(lim.MaxPartitions)), describeLimit(lim.RetentionMaxBytes))
 	if err := broker.Serve(ctx, listenAddr, registry, brokers, diskLog, offsetStore, coord, recorder); err != nil {
 		log.Fatalf("broker: %v", err)
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 
 	"github.com/AfzalRaja001/kafka-go/internal/protocol"
@@ -63,4 +64,56 @@ func brokerConfigFromEnv(getenv func(string) string) (protocol.Broker, error) {
 	}
 
 	return broker, nil
+}
+
+// limits are the optional caps that keep a broker reachable by strangers
+// from being filled up or exhausted. Zero means unlimited for both, which is
+// what the broker always did before they existed, so leaving the variables
+// unset changes nothing.
+type limits struct {
+	// MaxPartitions caps the partitions across all topics together
+	// (KAFKA_MAX_PARTITIONS). Without it a client can create topics until
+	// the broker runs out of file handles or disk.
+	MaxPartitions int32
+
+	// RetentionMaxBytes caps each partition's size on disk
+	// (KAFKA_RETENTION_MAX_BYTES), oldest segments deleted first. Retention
+	// runs on a timer, so a partition can overshoot the cap between runs,
+	// and it never deletes the segment being written.
+	RetentionMaxBytes int64
+}
+
+// limitsFromEnv reads the limits from the environment. Like
+// brokerConfigFromEnv, a value that is set but does not parse is an error:
+// a mistyped limit that silently fell back to "unlimited" would leave a
+// public broker unprotected without anyone noticing.
+func limitsFromEnv(getenv func(string) string) (limits, error) {
+	var l limits
+
+	if v := getenv("KAFKA_MAX_PARTITIONS"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 32)
+		if err != nil || n < 0 {
+			return limits{}, fmt.Errorf("KAFKA_MAX_PARTITIONS: %q is not a whole number from 0 to %d", v, math.MaxInt32)
+		}
+		l.MaxPartitions = int32(n)
+	}
+
+	if v := getenv("KAFKA_RETENTION_MAX_BYTES"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 0 {
+			return limits{}, fmt.Errorf("KAFKA_RETENTION_MAX_BYTES: %q is not a whole number of bytes, 0 or more", v)
+		}
+		l.RetentionMaxBytes = n
+	}
+
+	return l, nil
+}
+
+// describeLimit renders a limit for the startup log, where 0 reads as
+// "unlimited" rather than as a limit of zero.
+func describeLimit(n int64) string {
+	if n == 0 {
+		return "unlimited"
+	}
+	return strconv.FormatInt(n, 10)
 }
