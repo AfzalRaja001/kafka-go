@@ -1045,3 +1045,55 @@ a 3-partition topic is created, a second 3-partition topic is refused, a 2-parti
 cap, one more partition is refused, no directory exists for any refused topic, and deleting the first topic lets a new
 one in. With a 20 MB size cap, 70 MB written to one partition (five segments) was trimmed to the single 9.8 MB active
 segment at the next sweep. A bad value exits at startup with a message naming the variable.
+
+## 2026-10-18 - Production deployment files (second step of deployment)
+
+The target is a free Oracle Cloud Always Free Arm VM, with the broker's port open to everyone from the first day,
+as chosen. These files make that repeatable and keep everything except the Kafka port off the public address.
+
+**A separate production Compose file, not flags on the dev one.** The dev stack is built for convenience: Grafana
+gives anonymous visitors Admin, Prometheus has a second scrape target for a natively-run broker, and the broker
+advertises `localhost`. None of that is acceptable on a public IP, and a boolean switch would put both sets of
+defaults in one file where a mistake exposes the wrong one. `deploy/prod/docker-compose.prod.yml` publishes only
+port 9092. The metrics port, Prometheus and Grafana are bound to `127.0.0.1` and reached through an SSH tunnel.
+Prometheus and Grafana are behind a Compose profile (`monitoring`), so a plain `up` starts only the broker, which is
+all the free VM has to run. Grafana is read-only for anonymous visitors and its admin password comes from the env
+file; its database now lives in a volume, which fixes the 8-minute first-boot migration on every recreate for the
+production stack (plan item 14; the dev stack is left as it was).
+
+**The advertised host is required, not defaulted.** Clients are told to reconnect to `KAFKA_ADVERTISED_HOST`, so a
+default of `localhost` would let every command appear to work from the VM and fail for everyone else, after the
+first request. The Compose file uses `${KAFKA_ADVERTISED_HOST:?...}` so a missing value stops `up` with a message,
+and `redeploy.sh` checks for an empty one before it starts building. Also set in the file: the limits from the
+previous step with the values worked out for the VM (200 partitions, 100 MB each, about 23 GB worst case on a 50 GB
+disk), `restart: unless-stopped`, a 2 GB memory ceiling and a process cap so a runaway cannot take down the SSH
+daemon with it, a raised file-descriptor limit (every partition holds three files open), and log rotation so the
+container log cannot fill the disk. The Prometheus and Grafana images are pinned to specific versions instead of
+`latest`, so a redeploy cannot change the dashboards underneath you.
+
+**Two scripts, both safe to run again.** `scripts/bootstrap-vm.sh` installs Docker, the Compose plugin, buildx and git
+from Ubuntu's own repositories (rather than piping a download into a shell), adds the user to the docker group, and
+opens TCP 9092 in the VM's firewall before its first REJECT rule, saved across reboots. Docker's published ports
+normally bypass that firewall's INPUT chain, so the rule is a belt-and-braces measure and what a natively-run broker
+would need; it is documented as that. `scripts/redeploy.sh` pulls, rebuilds, starts, waits until port 9092 accepts a
+connection (printing the broker's log and failing if it does not), and prunes old images. It doubles as the recovery
+procedure: Oracle may reclaim an Always Free instance that stays idle, and the answer is not to fight that but to make
+rebuilding cheap. Data does not survive a reclaimed VM, which the runbook says in plain words.
+
+**Shell scripts are pinned to LF line endings** with a `.gitattributes` rule. The repository is developed on Windows,
+where Git would otherwise check scripts out with CRLF, and a carriage return at the end of a line is a syntax error
+on Linux. The executable bit is set in the index. `deploy/prod/.env` is git-ignored; only `.env.example` is committed.
+
+**What was verified, and what was not.** Verified: `docker compose config` accepts the file and fails with the
+intended message when the advertised host is missing; both scripts pass 23 checks against stub `sudo`, `docker`,
+`git` and `iptables` commands that record what they are asked to do, including a realistic Oracle iptables table
+(the rule goes in at position 6, ahead of the REJECT), the not-as-root refusal, the missing and empty settings file,
+the monitoring and no-pull switches, and the 60-second give-up path with the broker's log. That testing found one
+real bug, `$USER` being unset in some shells and stopping the script under `set -u`, now replaced with `id -un`; and
+the first `.sh` copy had CRLF endings from an editing step, caught by `file` and fixed. The Ubuntu 24.04 package
+names (`docker.io`, `docker-compose-v2`, `docker-buildx`, all in the standard repositories, with Arm builds) were
+checked against Ubuntu's package index. **Not verified:** the containers were not started, because Docker Desktop's
+engine could not be brought up in this session, and the scripts have not run on a real Ubuntu VM. The first real run
+on the VM is the test of those parts; the runbook has a troubleshooting table for the likely failures, and
+`redeploy.sh` prints the broker's log when it does not come up. The broker itself, with the same environment
+variables and limits, was exercised natively against the official Kafka tools in the previous step.

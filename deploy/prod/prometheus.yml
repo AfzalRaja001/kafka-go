@@ -1,0 +1,11 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: "kafka-go"
+    static_configs:
+      # One target: the broker service on the compose network. The dev
+      # stack's second target (host.docker.internal) is left out on purpose -
+      # on a server there is no natively-run broker, and that name has no
+      # reason to resolve.
+      - targets: ["broker:9101"]

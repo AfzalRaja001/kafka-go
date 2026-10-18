@@ -1,0 +1,102 @@
+# Production stack for a public VM (see docs/deployment.md).
+#
+# Differences from deploy/docker-compose.yml, which is the local-dev stack:
+#
+#  - Only the broker's Kafka port is reachable from outside the machine.
+#    Metrics, Prometheus and Grafana are bound to 127.0.0.1, so they can only
+#    be reached through an SSH tunnel. The broker has no authentication, and
+#    the dev stack's Grafana gives anonymous visitors Admin; neither belongs
+#    on a public address.
+#  - The advertised host is required: clients are told to reconnect to it, so
+#    leaving it as "localhost" would make every client except one on the VM
+#    itself fail after its first request.
+#  - The broker is started with the public-broker limits (partition count and
+#    per-partition size), restarts by itself, and has a memory ceiling.
+#  - Prometheus and Grafana are optional (compose profile "monitoring") and
+#    Grafana keeps its database in a volume, so recreating the container does
+#    not repeat the long first-boot database migration.
+#
+# Usage, from the repository root on the VM:
+#   cp deploy/prod/.env.example deploy/prod/.env      # then edit it
+#   docker compose --env-file deploy/prod/.env -f deploy/prod/docker-compose.prod.yml up -d --build
+# With the dashboards too:
+#   ... --profile monitoring up -d --build
+# scripts/redeploy.sh does the update-and-restart in one command.
+
+services:
+  broker:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "9092:9092"
+      # Metrics for Prometheus or an SSH tunnel; loopback only.
+      - "127.0.0.1:9101:9101"
+    environment:
+      KAFKA_ADVERTISED_HOST: ${KAFKA_ADVERTISED_HOST:?set KAFKA_ADVERTISED_HOST in deploy/prod/.env to the VM's public IP or hostname}
+      KAFKA_ADVERTISED_PORT: ${KAFKA_ADVERTISED_PORT:-9092}
+      KAFKA_NODE_ID: ${KAFKA_NODE_ID:-1}
+      KAFKA_MAX_PARTITIONS: ${KAFKA_MAX_PARTITIONS:-200}
+      KAFKA_RETENTION_MAX_BYTES: ${KAFKA_RETENTION_MAX_BYTES:-104857600}
+    volumes:
+      - broker-data:/app/data
+    # Every partition holds three files open, plus one per client connection.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    # A ceiling, not a reservation: the broker itself uses tens of megabytes,
+    # and this keeps a runaway from taking the whole VM (and its SSH daemon)
+    # down with it.
+    mem_limit: 2g
+    pids_limit: 1024
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  prometheus:
+    profiles: ["monitoring"]
+    image: prom/prometheus:v2.55.1
+    restart: unless-stopped
+    depends_on:
+      - broker
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # Keep the time-series database small on a small disk.
+      - --storage.tsdb.retention.time=7d
+      - --storage.tsdb.retention.size=1GB
+
+  grafana:
+    profiles: ["monitoring"]
+    image: grafana/grafana:11.3.1
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    volumes:
+      # The database lives in a volume, so recreating the container is quick
+      # (the dev stack re-runs about 8 minutes of first-boot migrations).
+      - grafana-data:/var/lib/grafana
+      - ../grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      # Anonymous visitors may look but not change anything. Editing needs the
+      # admin login, whose password comes from deploy/prod/.env.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+
+volumes:
+  broker-data:
+  prometheus-data:
+  grafana-data:
