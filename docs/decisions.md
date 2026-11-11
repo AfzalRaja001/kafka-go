@@ -1097,3 +1097,45 @@ engine could not be brought up in this session, and the scripts have not run on 
 on the VM is the test of those parts; the runbook has a troubleshooting table for the likely failures, and
 `redeploy.sh` prints the broker's log when it does not come up. The broker itself, with the same environment
 variables and limits, was exercised natively against the official Kafka tools in the previous step.
+
+## 2026-10-19 - First deployment: what was chosen, what went wrong, what was learned
+
+The broker was deployed on a free Oracle Cloud VM following `docs/deployment.md`, and verified over the internet.
+
+**Host.** Oracle's Always Free tier lists two compute shapes: the Arm `VM.Standard.A1.Flex` (up to 2 CPUs and 12 GB)
+and the AMD `VM.Standard.E2.1.Micro` (1/8 of a CPU, 1 GB, up to two per account). The Arm shape returned "Out of
+capacity" in the home region, which Oracle says nothing about in advance and which cannot be fixed by the user. The
+AMD micro was used instead. Other options were looked at and set aside: Azure for Students (credit, not permanent),
+Google's e2-micro (third-party sources say the external IP and outbound traffic are not fully free), and a free TCP
+tunnel to a home machine (free-tier terms conflict between sources and addresses change). A paid shape,
+`VM.Standard.E5.Flex`, was created by mistake while working around the capacity error; it is not Always Free (it
+only ran on trial credit) and was terminated with its boot volume. The lesson is to check for the "Always
+Free-eligible" label before creating anything.
+
+**Sizing.** One gigabyte is enough to run the broker (the container used about 7 MB) but not to build the Docker image,
+so a 2 GB swap file is needed. The first build took about 340 seconds and a rebuild 170, on a sliver of a CPU. Grafana
+and Prometheus are not run on that machine.
+
+**The advertised address is the thing that fails quietly.** The first start advertised a documentation address
+(203.0.113.7, the example used in testing) instead of the real public IP; the startup log line showing the
+advertised address is what made it visible, and fixing the env file and rerunning the script was enough. The runbook
+already says listing topics working while produce hangs means this setting is wrong.
+
+**An investigation worth recording.** Testing over the internet from the development laptop showed consumer-group
+close stalling: franz-go's `LeaveGroup` got no answer for 10 seconds on the first attempt (6 of 7 runs; one run passed, for no reason found)
+and the retry on a fresh connection answered in about 60 ms; the Java console consumer returned 0 messages after 60
+seconds in one run and took 2 minutes in another. Ruled out in turn: the client library (two different ones), latency
+(a local broker behind a proxy adding 60 ms each way answered `LeaveGroup` in 120 ms), VM resources (load 0.1, the
+container at 7 MB and 0.02% CPU), and the coordinator code (read; its locks are held briefly). Closing or resetting
+one connection while another is open also did not stall the other. The deciding evidence was the broker log: every
+affected connection ended with `read: connection timed out`, all from a single client IP, appearing about 150 seconds
+after each test (Go's TCP keepalive gives up after 150 seconds of silence), which means the server never saw those
+connections close; and from a phone hotspot on another laptop everything worked. So packets on one connection per run
+were disappearing somewhere on the development network's path. One of my own diagnostics was wrong and is worth
+noting: `ss` on the host cannot see connections to a Docker container (they live in the container's network
+namespace), so an empty `ss` proved nothing. Not proven: that the broker plays no part. It is recorded as a quirk to
+re-test from a clean network, not as a fixed bug.
+
+**State at the end of the session.** Live and working at 130.210.55.103:9092 with the limits in force; the remaining
+items before the `v1.0-singlenode` tag are listed in `docs/plan.md` under "Where things stand after the first
+deployment".

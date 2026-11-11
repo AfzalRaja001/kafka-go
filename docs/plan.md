@@ -41,11 +41,13 @@ they are useful framing when describing the project.
 | 3 | Produce, Fetch, ListOffsets, CreateTopics, DeleteTopics | Done, **1 gap** (`acks` ignored) |
 | 4 | Consumer groups + `__consumer_offsets` | Done |
 | 5 | Production polish | **Mostly done - 1 item left** |
-| 7 | Deploy | Partially done, **blocks v1.0** |
+| 7 | Deploy | **Live** on a free Oracle VM (2026-10-19); tag blocked on bugs 8-11 |
 | 6 | Replication (stretch) | Not started, gated |
 
-34 PRs merged, none open (topic name validation and the Produce existence
-check, below, is the next one to open). All of
+37 PRs merged, none open. The broker is **deployed and reachable** at
+130.210.55.103:9092 (free Oracle Cloud `VM.Standard.E2.1.Micro`, 1 GB, x86);
+what is left before the `v1.0-singlenode` tag is listed under "Where things
+stand after the first deployment" below. All of
 `go build ./... && go vet ./... && go test -race ./...` passes, and CI
 (`.github/workflows/ci.yml`) runs exactly that on every push and PR.
 
@@ -413,6 +415,51 @@ from the README alone, without asking a question.
 
 **Exit criteria:** `kcat -b <public-host>:9092 -L` works from a machine that
 is not the broker's host, and the tag exists.
+
+### Where things stand after the first deployment (2026-10-19)
+
+Done: the broker runs on a free Oracle Cloud VM and works over the internet
+(topic create, produce, consume, consumer groups), verified with the official
+Kafka 3.9.1 tools from two networks. Ports 3000, 9090 and 9101 are closed to
+the outside; only 9092 is open, with `KAFKA_MAX_PARTITIONS=100` and
+`KAFKA_RETENTION_MAX_BYTES=104857600` in force. Redeploy is
+`bash scripts/redeploy.sh` on the VM; the runbook is `docs/deployment.md`.
+
+What actually happened, for the next person: the free Arm shape
+(`VM.Standard.A1.Flex`) was "Out of capacity" in the chosen region, so the
+free AMD micro shape (`VM.Standard.E2.1.Micro`, 1 GB) was used instead, with a
+2 GB swap file added by hand because the Docker build needs it. A paid shape
+(`VM.Standard.E5.Flex`) was created by mistake first and terminated; it is not
+in the Always Free tier. The reserved IP was not used.
+
+**Open, before the tag (in this order):**
+
+15. **Deployment follow-ups (small).** Put the swap file into
+    `scripts/bootstrap-vm.sh` (when RAM is under about 3 GB); make the port
+    check in `scripts/redeploy.sh` send nothing (`echo >` sends a newline, so
+    the broker logs a harmless `unexpected EOF` on every deploy); correct
+    `docs/deployment.md`: it says Arm and a reserved IP, while the tested setup
+    is the x86 micro VM, and its claim that a reserved IP is free could not be
+    confirmed on Oracle's Always Free page; add the E5 warning.
+16. **Bugs 8-11** (batch validation, oversized records, fetch past the end,
+    idle partition delay). Bug 8 matters most now that the port is public: a
+    client can make a partition unreadable.
+17. **README live-demo link, then tag `v1.0-singlenode`.** The demo GIF is
+    still unrecorded.
+
+**Known quirks, not bugs in the broker as far as tested:**
+
+- From one home network, a consumer's `LeaveGroup` stalled for 10 seconds per
+  run and the Java console consumer took minutes to exit; the broker log showed
+  `connection timed out` for every affected connection, all from that one IP.
+  From a phone hotspot on a second laptop everything was fast, and a local
+  broker behind a 60 ms-each-way delay proxy was fine. Conclusion: a flaky
+  path on that network. Not proven impossible that the broker contributes, so
+  re-test group close times from a clean network when convenient.
+- Oracle may reclaim an idle Always Free instance (CPU, network, and on Arm
+  memory under 20% for 7 days). If it happens, create a new VM, run
+  `scripts/bootstrap-vm.sh` and `scripts/redeploy.sh`; the data is lost.
+- A `hello` test topic and a few test consumer groups exist on the live broker.
 
 ### Step 3 - integration test suite (~4-6 hrs)
 
